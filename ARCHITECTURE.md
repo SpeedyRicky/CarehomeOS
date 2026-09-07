@@ -10,8 +10,19 @@ payroll integration.
 
 - **Client**: React 19 + Vite, Tailwind, `lucide-react` icons. Single-page
   app (`src/App.tsx`) with tab-based navigation, no router.
-- **Server**: Express (`server.ts`) serving the API and, in production, the
-  built client bundle. Runs as a single Node process.
+- **Server**: Express (`server.ts`), exposed two ways:
+  - As a persistent Node process (`startServer()`, used for local dev and
+    any traditional host like Cloud Run) that also serves the built client
+    bundle.
+  - As a Vercel serverless function (`api/[...all].ts`, `vercel.json`),
+    which imports `createApiApp()` — the same route definitions with no
+    dev-server/static-file logic attached — since Vercel serves the built
+    frontend from its own CDN and only needs the API routes. **Vercel
+    limitation**: each serverless invocation may be a fresh cold start, so
+    `dbState` (see below) does not reliably persist writes across requests
+    there. Login itself is unaffected (credentials are static seed data);
+    treat a Vercel deployment as a login/UI demo until the data layer
+    moves to a real database.
 - **Data store**: an in-memory object (`dbState` in `server.ts`) seeded from
   `src/seedData.ts`, structured to mirror a relational schema 1:1. There is
   no database yet — see "Prototype → Production" below.
