@@ -16,6 +16,9 @@ import {
   IncidentReport,
   AuditEvent,
   NotificationItem,
+  ShiftTemplate,
+  TimeEntry,
+  ShiftChangeRequest,
 } from './types';
 
 export const INITIAL_ORGANIZATION: Organization = {
@@ -194,6 +197,54 @@ export const INITIAL_SHIFT_ASSIGNMENTS: ShiftAssignment[] = [
     clocked_in_at: '2026-09-07T08:58:00Z',
     clocked_out_at: null,
     is_active: true,
+  },
+  {
+    id: 'assign-dave-night',
+    staff_id: 'staff-dave',
+    shift_id: 'shift-night-today',
+    date: '2026-09-07',
+    clocked_in_at: null,
+    clocked_out_at: null,
+    is_active: false,
+  },
+  // Next day's roster — powers the "My Schedule" upcoming-shifts view and
+  // demonstrates that a shift partner is computed per date, not fixed per
+  // staff member (Sarah is partnered with Dave here, with Mary on nights).
+  {
+    id: 'assign-sarah-day-tmrw',
+    staff_id: 'staff-sarah',
+    shift_id: 'shift-day-today',
+    date: '2026-09-08',
+    clocked_in_at: null,
+    clocked_out_at: null,
+    is_active: false,
+  },
+  {
+    id: 'assign-dave-day-tmrw',
+    staff_id: 'staff-dave',
+    shift_id: 'shift-day-today',
+    date: '2026-09-08',
+    clocked_in_at: null,
+    clocked_out_at: null,
+    is_active: false,
+  },
+  {
+    id: 'assign-mary-night-tmrw',
+    staff_id: 'staff-mary',
+    shift_id: 'shift-night-today',
+    date: '2026-09-08',
+    clocked_in_at: null,
+    clocked_out_at: null,
+    is_active: false,
+  },
+  {
+    id: 'assign-olatundun-mgr-tmrw',
+    staff_id: 'staff-olatundun',
+    shift_id: 'shift-mgr-office',
+    date: '2026-09-08',
+    clocked_in_at: null,
+    clocked_out_at: null,
+    is_active: false,
   },
 ];
 
@@ -690,5 +741,113 @@ export const INITIAL_NOTIFICATIONS: NotificationItem[] = [
     created_at: '2026-08-31T08:00:00Z',
     read: true,
     urgency: 'routine',
+  },
+];
+
+// ==========================================
+// SCHEDULING: shift templates, time entries, shift change requests
+// ==========================================
+
+export const INITIAL_SHIFT_TEMPLATES: ShiftTemplate[] = [
+  {
+    id: 'template-day',
+    home_id: 'home-nl-01',
+    name: 'Day Shift',
+    starts_at: '07:00',
+    ends_at: '19:00',
+    days_of_week: [0, 1, 2, 3, 4, 5, 6],
+    required_staff_count: 2,
+    required_credential_types: ['Standard First Aid & CPR Level C', 'Vulnerable Sector Check'],
+    is_active: true,
+  },
+  {
+    id: 'template-night',
+    home_id: 'home-nl-01',
+    name: 'Night Shift',
+    starts_at: '19:00',
+    ends_at: '07:00',
+    days_of_week: [0, 1, 2, 3, 4, 5, 6],
+    required_staff_count: 1,
+    required_credential_types: ['Standard First Aid & CPR Level C', 'Vulnerable Sector Check'],
+    is_active: true,
+  },
+  {
+    id: 'template-mgr-office',
+    home_id: 'home-nl-01',
+    name: 'Manager Office Hours',
+    starts_at: '09:00',
+    ends_at: '15:00',
+    days_of_week: [1, 2, 3, 4, 5],
+    required_staff_count: 1,
+    required_credential_types: [],
+    is_active: true,
+  },
+];
+
+export const INITIAL_TIME_ENTRIES: TimeEntry[] = [
+  {
+    id: 'time-sarah-in',
+    home_id: 'home-nl-01',
+    staff_id: 'staff-sarah',
+    shift_assignment_id: 'assign-sarah-day',
+    entry_type: 'clock_in',
+    timestamp: '2026-09-07T06:55:00Z',
+    source: 'app',
+    is_corrected: false,
+    corrected_by: null,
+    correction_reason: null,
+    qbo_synced: false,
+    qbo_sync_id: null,
+    qbo_sync_error: null,
+  },
+  {
+    id: 'time-mary-in',
+    home_id: 'home-nl-01',
+    staff_id: 'staff-mary',
+    shift_assignment_id: 'assign-mary-day',
+    entry_type: 'clock_in',
+    timestamp: '2026-09-07T07:02:00Z',
+    source: 'app',
+    is_corrected: false,
+    corrected_by: null,
+    correction_reason: null,
+    qbo_synced: false,
+    qbo_sync_id: null,
+    qbo_sync_error: null,
+  },
+  {
+    id: 'time-olatundun-in',
+    home_id: 'home-nl-01',
+    staff_id: 'staff-olatundun',
+    shift_assignment_id: 'assign-olatundun-mgr',
+    entry_type: 'clock_in',
+    timestamp: '2026-09-07T08:58:00Z',
+    source: 'app',
+    is_corrected: false,
+    corrected_by: null,
+    correction_reason: null,
+    qbo_synced: false,
+    qbo_sync_id: null,
+    qbo_sync_error: null,
+  },
+];
+
+export const INITIAL_SHIFT_CHANGE_REQUESTS: ShiftChangeRequest[] = [
+  {
+    id: 'change-req-01',
+    home_id: 'home-nl-01',
+    shift_assignment_id: 'assign-dave-day-tmrw',
+    requested_by: 'staff-dave',
+    requested_by_name: 'Dave Tremblett',
+    request_type: 'swap',
+    target_staff_id: 'staff-mary',
+    target_staff_name: 'Mary Power',
+    reason: 'Medical appointment in St. John’s on the 8th — requesting a swap with Mary’s night shift.',
+    status: 'pending',
+    reviewed_by: null,
+    reviewed_by_name: null,
+    reviewed_at: null,
+    review_notes: null,
+    created_at: '2026-09-06T20:15:00Z',
   },
 ];

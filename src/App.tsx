@@ -1,7 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import { ShieldAlert } from 'lucide-react';
 import { Header } from './components/Header';
+import { LoginView } from './components/LoginView';
 import { TodayView } from './components/TodayView';
+import { ScheduleView } from './components/ScheduleView';
 import { EMARView } from './components/EMARView';
 import { IncidentsView } from './components/IncidentsView';
 import { ResidentsView } from './components/ResidentsView';
@@ -15,6 +17,7 @@ import { DailyReportModal } from './components/DailyReportModal';
 import { ShiftChecklistModal } from './components/ShiftChecklistModal';
 import {
   INITIAL_STAFF,
+  INITIAL_SHIFTS,
   INITIAL_SHIFT_ASSIGNMENTS,
   INITIAL_RESIDENTS,
   INITIAL_PROSPECTS,
@@ -28,9 +31,12 @@ import {
   INITIAL_AUDIT_EVENTS,
   INITIAL_NOTIFICATIONS,
   INITIAL_RULESET,
+  INITIAL_SHIFT_CHANGE_REQUESTS,
+  INITIAL_TIME_ENTRIES,
 } from './seedData';
 import {
   Staff,
+  Shift,
   ShiftAssignment,
   Resident,
   Prospect,
@@ -43,15 +49,29 @@ import {
   IncidentReport,
   AuditEvent,
   NotificationItem,
+  ShiftChangeRequest,
+  ShiftChangeRequestType,
+  TimeEntry,
 } from './types';
+
+const TOKEN_STORAGE_KEY = 'carehomeos_token';
 
 export default function App() {
   // Navigation
   const [activeTab, setActiveTab] = useState<string>('today');
 
+  // Auth state — gates the entire app behind LoginView until a session token
+  // is established. See SECURITY.md for the session-token design and its
+  // production hardening checklist.
+  const [authToken, setAuthToken] = useState<string | null>(() =>
+    typeof window !== 'undefined' ? window.localStorage.getItem(TOKEN_STORAGE_KEY) : null
+  );
+  const [currentStaff, setCurrentStaff] = useState<Staff | null>(null);
+  const [authChecked, setAuthChecked] = useState(false);
+
   // Core domain state (initialized with seed, synced with server API)
   const [staffList, setStaffList] = useState<Staff[]>(INITIAL_STAFF);
-  const [currentStaff, setCurrentStaff] = useState<Staff>(INITIAL_STAFF[0]); // Default: Sarah Jenkins (Care Worker)
+  const [shifts, setShifts] = useState<Shift[]>(INITIAL_SHIFTS);
   const [shiftAssignments, setShiftAssignments] = useState<ShiftAssignment[]>(INITIAL_SHIFT_ASSIGNMENTS);
   const [residents, setResidents] = useState<Resident[]>(INITIAL_RESIDENTS);
   const [prospects, setProspects] = useState<Prospect[]>(INITIAL_PROSPECTS);
@@ -65,6 +85,8 @@ export default function App() {
   const [auditEvents, setAuditEvents] = useState<AuditEvent[]>(INITIAL_AUDIT_EVENTS);
   const [notifications, setNotifications] = useState<NotificationItem[]>(INITIAL_NOTIFICATIONS);
   const [ruleset, setRuleset] = useState(INITIAL_RULESET);
+  const [shiftChangeRequests, setShiftChangeRequests] = useState<ShiftChangeRequest[]>(INITIAL_SHIFT_CHANGE_REQUESTS);
+  const [timeEntries, setTimeEntries] = useState<TimeEntry[]>(INITIAL_TIME_ENTRIES);
 
   // Modals state
   const [isNewIncidentOpen, setIsNewIncidentOpen] = useState(false);
@@ -76,14 +98,39 @@ export default function App() {
 
   const [isShiftChecklistOpen, setIsShiftChecklistOpen] = useState(false);
 
-  // Fetch initial state from server
+  const authFetch = (url: string, options: RequestInit = {}) =>
+    fetch(url, {
+      ...options,
+      headers: {
+        ...(options.headers || {}),
+        ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
+      },
+    });
+
+  // Resolve the current session (if any) and load org state — only once a
+  // token exists, since /api/state and /api/auth/me require authentication.
   useEffect(() => {
-    async function loadServerState() {
+    async function resolveSessionAndLoadState() {
+      if (!authToken) {
+        setAuthChecked(true);
+        return;
+      }
       try {
-        const res = await fetch('/api/state');
+        const meRes = await authFetch('/api/auth/me');
+        if (!meRes.ok) {
+          window.localStorage.removeItem(TOKEN_STORAGE_KEY);
+          setAuthToken(null);
+          setAuthChecked(true);
+          return;
+        }
+        const meData = await meRes.json();
+        setCurrentStaff(meData.staff);
+
+        const res = await authFetch('/api/state');
         if (res.ok) {
           const data = await res.json();
           if (data.staff) setStaffList(data.staff);
+          if (data.shifts) setShifts(data.shifts);
           if (data.shiftAssignments) setShiftAssignments(data.shiftAssignments);
           if (data.residents) setResidents(data.residents);
           if (data.prospects) setProspects(data.prospects);
@@ -97,19 +144,20 @@ export default function App() {
           if (data.auditEvents) setAuditEvents(data.auditEvents);
           if (data.notifications) setNotifications(data.notifications);
           if (data.ruleset) setRuleset(data.ruleset);
+          if (data.shiftChangeRequests) setShiftChangeRequests(data.shiftChangeRequests);
+          if (data.timeEntries) setTimeEntries(data.timeEntries);
         }
       } catch (err) {
         console.warn('Using client memory state:', err);
+      } finally {
+        setAuthChecked(true);
       }
     }
-    loadServerState();
-  }, []);
+    resolveSessionAndLoadState();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [authToken]);
 
-  const activeAssignment = shiftAssignments.find(
-    (a) => a.staff_id === currentStaff.id && a.is_active
-  );
-
-  const isCareWorker = currentStaff.role === 'Care Worker';
+  const isCareWorker = currentStaff?.role === 'Care Worker';
   const restrictedTabs = ['reassessments', 'crm', 'compliance'];
 
   // Automatically divert Care Workers away from restricted modules
@@ -119,16 +167,45 @@ export default function App() {
     }
   }, [isCareWorker, activeTab]);
 
+  const handleLoginSuccess = (staff: Staff, token: string) => {
+    window.localStorage.setItem(TOKEN_STORAGE_KEY, token);
+    setAuthToken(token);
+    setCurrentStaff(staff);
+  };
+
+  const handleLogout = () => {
+    window.localStorage.removeItem(TOKEN_STORAGE_KEY);
+    setAuthToken(null);
+    setCurrentStaff(null);
+    setActiveTab('today');
+  };
+
+  if (!authChecked) {
+    return (
+      <div className="min-h-screen bg-slate-950 flex items-center justify-center text-slate-400 text-sm">
+        Loading CareHomeOS…
+      </div>
+    );
+  }
+
+  if (!currentStaff) {
+    return <LoginView onLoginSuccess={handleLoginSuccess} />;
+  }
+
+  const activeAssignment = shiftAssignments.find(
+    (a) => a.staff_id === currentStaff.id && a.is_active
+  );
+
   // Clock In / Out Toggle Handler
   const handleClockToggle = async () => {
     const action = activeAssignment?.is_active ? 'clock_out' : 'clock_in';
     try {
-      const res = await fetch('/api/shifts/clock', {
+      const res = await authFetch('/api/shifts/clock', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           staffId: currentStaff.id,
-          shiftId: 'shift-day-today',
+          shiftId: activeAssignment?.shift_id || 'shift-day-today',
           action,
         }),
       });
@@ -142,17 +219,58 @@ export default function App() {
           }
           return filtered;
         });
+        if (data.timeEntry) {
+          setTimeEntries((prev) => [data.timeEntry, ...prev]);
+        }
       }
     } catch (err) {
       console.error(err);
     }
   };
 
-  // Switch Active Staff Member (Demonstrates RBAC & Segregation of Duties)
-  const handleSelectStaff = (staff: Staff) => {
-    setCurrentStaff(staff);
-    if (staff.role === 'Care Worker' && restrictedTabs.includes(activeTab)) {
-      setActiveTab('today');
+  // Submit a shift change request (swap / cover / time off)
+  const handleSubmitShiftChangeRequest = async (payload: {
+    shiftAssignmentId: string;
+    requestType: ShiftChangeRequestType;
+    targetStaffId: string | null;
+    reason: string;
+  }) => {
+    try {
+      const res = await authFetch('/api/shift-change-requests', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setShiftChangeRequests((prev) => [data.request, ...prev]);
+      }
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  // Manager/Owner review of a shift change request (approve / deny)
+  const handleReviewShiftChangeRequest = async (payload: {
+    requestId: string;
+    action: 'approve' | 'deny';
+    reviewNotes?: string;
+  }) => {
+    try {
+      const res = await authFetch(`/api/shift-change-requests/${payload.requestId}/review`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: payload.action, reviewNotes: payload.reviewNotes }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setShiftChangeRequests((prev) => prev.map((r) => (r.id === data.request.id ? data.request : r)));
+      } else {
+        const err = await res.json();
+        alert(err.error || 'Review failed');
+      }
+    } catch (err) {
+      console.error(err);
     }
   };
 
@@ -176,7 +294,7 @@ export default function App() {
     scheduledTime: string;
   }) => {
     try {
-      const res = await fetch('/api/emar/administer', {
+      const res = await authFetch('/api/emar/administer', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
@@ -207,7 +325,7 @@ export default function App() {
   // Save Daily Shift Report
   const handleSaveDailyReport = async (report: DailyReport) => {
     try {
-      const res = await fetch('/api/daily-reports', {
+      const res = await authFetch('/api/daily-reports', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(report),
@@ -244,7 +362,7 @@ export default function App() {
   // Save End-of-Shift Safety & Medication Checklist
   const handleSaveShiftChecklist = async (checklist: ShiftChecklist) => {
     try {
-      const res = await fetch('/api/shift-checklists', {
+      const res = await authFetch('/api/shift-checklists', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(checklist),
@@ -274,7 +392,7 @@ export default function App() {
   // Submit Incident Report (Taxonomy Form)
   const handleSubmitIncident = async (incident: IncidentReport) => {
     try {
-      const res = await fetch('/api/incidents/submit', {
+      const res = await authFetch('/api/incidents/submit', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(incident),
@@ -326,7 +444,7 @@ export default function App() {
     rejectionReason?: string;
   }) => {
     try {
-      const res = await fetch('/api/incidents/review', {
+      const res = await authFetch('/api/incidents/review', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(data),
@@ -366,7 +484,7 @@ export default function App() {
     newCarePlanCreated: boolean;
   }) => {
     try {
-      const res = await fetch('/api/reassessments/complete', {
+      const res = await authFetch('/api/reassessments/complete', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(data),
@@ -410,7 +528,7 @@ export default function App() {
     actorName: string;
   }) => {
     try {
-      const res = await fetch('/api/prospects/convert', {
+      const res = await authFetch('/api/prospects/convert', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(data),
@@ -464,11 +582,10 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-slate-100 text-slate-900 flex flex-col font-sans selection:bg-emerald-500 selection:text-white">
-      {/* Top App Header & Shift/Role Switcher */}
+      {/* Top App Header */}
       <Header
         currentStaff={currentStaff}
-        allStaff={staffList}
-        onSelectStaff={handleSelectStaff}
+        onLogout={handleLogout}
         activeAssignment={activeAssignment}
         onClockToggle={handleClockToggle}
         notifications={notifications}
@@ -502,6 +619,19 @@ export default function App() {
             }}
             onOpenShiftChecklist={() => setIsShiftChecklistOpen(true)}
             onNavigateToAI={() => setActiveTab('ai')}
+          />
+        )}
+
+        {activeTab === 'schedule' && (
+          <ScheduleView
+            currentStaff={currentStaff}
+            allStaff={staffList}
+            shifts={shifts}
+            shiftAssignments={shiftAssignments}
+            shiftChangeRequests={shiftChangeRequests}
+            timeEntries={timeEntries}
+            onSubmitShiftChangeRequest={handleSubmitShiftChangeRequest}
+            onReviewShiftChangeRequest={handleReviewShiftChangeRequest}
           />
         )}
 

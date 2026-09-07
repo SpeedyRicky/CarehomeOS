@@ -34,6 +34,10 @@ export interface Staff {
   mfa_enabled: boolean;
   schedule_type: 'rotating_shifts' | 'fixed_office';
   credentials: StaffCredential[];
+  // NOTE: password_hash / MFA secrets are never stored on this shared type.
+  // They live only in the server-side credential store (src/seedData.auth.ts
+  // in this prototype; a dedicated `staff_credentials_auth` table in
+  // production) and are never sent to the client. See SECURITY.md.
 }
 
 export interface Shift {
@@ -280,4 +284,62 @@ export interface NotificationItem {
   created_at: string;
   read: boolean;
   urgency: 'routine' | 'high' | 'critical';
+}
+
+// ==========================================
+// SCHEDULING: shift templates, time entries, shift change requests
+// ==========================================
+
+export interface ShiftTemplate {
+  id: string;
+  home_id: string;
+  name: string;
+  starts_at: string; // HH:MM, home-local time
+  ends_at: string; // HH:MM, home-local time
+  days_of_week: number[]; // 0=Sunday .. 6=Saturday
+  required_staff_count: number;
+  required_credential_types: string[];
+  is_active: boolean;
+}
+
+export type TimeEntryType = 'clock_in' | 'clock_out' | 'break_start' | 'break_end';
+export type TimeEntrySource = 'app' | 'quickbooks_time' | 'manual_correction';
+
+export interface TimeEntry {
+  id: string;
+  home_id: string;
+  staff_id: string;
+  shift_assignment_id: string | null;
+  entry_type: TimeEntryType;
+  timestamp: string;
+  source: TimeEntrySource;
+  is_corrected: boolean;
+  corrected_by: string | null;
+  correction_reason: string | null;
+  // QuickBooks Time (Intuit TSheets) sync bookkeeping — see
+  // src/services/quickbooksTimeService.ts and SECURITY.md.
+  qbo_synced: boolean;
+  qbo_sync_id: string | null;
+  qbo_sync_error: string | null;
+}
+
+export type ShiftChangeRequestType = 'swap' | 'cover' | 'time_off';
+export type ShiftChangeRequestStatus = 'pending' | 'approved' | 'denied' | 'cancelled';
+
+export interface ShiftChangeRequest {
+  id: string;
+  home_id: string;
+  shift_assignment_id: string;
+  requested_by: string;
+  requested_by_name: string;
+  request_type: ShiftChangeRequestType;
+  target_staff_id: string | null;
+  target_staff_name: string | null;
+  reason: string;
+  status: ShiftChangeRequestStatus;
+  reviewed_by: string | null;
+  reviewed_by_name: string | null;
+  reviewed_at: string | null;
+  review_notes: string | null;
+  created_at: string;
 }
