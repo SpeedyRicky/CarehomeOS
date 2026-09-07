@@ -246,9 +246,17 @@ function getAIClient() {
   return aiClient;
 }
 
-async function startServer() {
+/**
+ * Builds the Express app containing every `/api/*` route, with no
+ * dev-server or static-file concerns attached. This is the piece Vercel's
+ * serverless runtime needs (see api/[...all].ts) — Vercel serves the built
+ * frontend from its own CDN and only needs this app to answer API
+ * requests. `startServer()` below wraps this with dev/prod frontend
+ * serving and `app.listen()` for local development and any traditional
+ * Node host (e.g. Cloud Run).
+ */
+export function createApiApp(): express.Express {
   const app = express();
-  const PORT = 3000;
 
   // Capture the raw request body alongside the parsed JSON so webhook
   // handlers (e.g. QuickBooks Time) can verify an HMAC signature against the
@@ -1181,6 +1189,21 @@ Provide an accurate, concise answer with timestamps, aliases, and regulatory ref
     }
   });
 
+  return app;
+}
+
+/**
+ * Standalone entry point for local development and any traditional Node
+ * host (Cloud Run, a VM, etc.) — wraps createApiApp() with the Vite dev
+ * middleware (or the built static frontend in production) and starts
+ * listening. Not used on Vercel: see api/[...all].ts, which imports
+ * createApiApp() directly since Vercel's own static hosting/CDN serves the
+ * built frontend.
+ */
+async function startServer() {
+  const app = createApiApp();
+  const PORT = process.env.PORT ? Number(process.env.PORT) : 3000;
+
   // Vite middleware for development vs static build in production
   if (process.env.NODE_ENV !== 'production') {
     const { createServer: createViteServer } = await import('vite');
@@ -1202,4 +1225,9 @@ Provide an accurate, concise answer with timestamps, aliases, and regulatory ref
   });
 }
 
-startServer();
+// Vercel provides its own process/routing model for serverless functions
+// (see api/[...all].ts) and sets this env var in both its build and
+// runtime environments — never auto-start a persistent listener there.
+if (!process.env.VERCEL) {
+  startServer();
+}
