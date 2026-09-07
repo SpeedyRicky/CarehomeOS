@@ -1,0 +1,6 @@
+{
+  "name": "CareHomeOS",
+  "description": "Small-home care operating system featuring shift-scoped task queues, eMAR, typed incident workflows with segregation of duties, immutable event logging, and audit-safe AI summarization.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
