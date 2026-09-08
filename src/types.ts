@@ -35,9 +35,9 @@ export interface Staff {
   mfa_enabled: boolean;
   schedule_type: 'rotating_shifts' | 'fixed_office';
   credentials: StaffCredential[];
-  // NOTE: password_hash / OTP state are never on this shared type — they
-  // live server-only (src/seedData.auth.ts, and in-memory OTP/reset state
-  // in src/apiApp.ts) and are never sent to the client. See SECURITY.md.
+  // NOTE: login credentials (password, OTP code) are not part of this
+  // type — see src/components/LoginView.tsx's DEMO_ACCOUNTS. See
+  // SECURITY.md.
 }
 
 export interface Shift {
