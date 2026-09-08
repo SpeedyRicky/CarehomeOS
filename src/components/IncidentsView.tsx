@@ -15,6 +15,7 @@ import {
   Eye,
 } from 'lucide-react';
 import { IncidentReport, Resident, Staff } from '../types';
+import { isReviewTier } from '../roleAccess';
 
 interface IncidentsViewProps {
   incidents: IncidentReport[];
@@ -49,7 +50,7 @@ export const IncidentsView: React.FC<IncidentsViewProps> = ({
     return `${diffHours}h ${diffMins}m`;
   };
 
-  const isReviewerAuthorized = currentStaff.role === 'Manager' || currentStaff.role === 'Owner';
+  const isReviewerAuthorized = isReviewTier(currentStaff.role);
   const isAuthor = selectedIncident ? selectedIncident.reported_by === currentStaff.id : false;
   const isSegregationViolation = isAuthor && isReviewerAuthorized;
 

@@ -19,6 +19,7 @@ import {
   ShiftChangeRequestType,
   TimeEntry,
 } from '../types';
+import { isReviewTier } from '../roleAccess';
 
 interface ScheduleViewProps {
   currentStaff: Staff;
@@ -69,7 +70,7 @@ export const ScheduleView: React.FC<ScheduleViewProps> = ({
   const [targetStaffId, setTargetStaffId] = useState<string>('');
   const [reason, setReason] = useState('');
 
-  const isManager = currentStaff.role === 'Manager' || currentStaff.role === 'Owner';
+  const isManager = isReviewTier(currentStaff.role);
   const todayDate = new Date().toISOString().split('T')[0];
 
   const myUpcomingShifts = shiftAssignments
