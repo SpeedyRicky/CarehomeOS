@@ -1,21 +1,30 @@
 import express from 'express';
 import path from 'path';
-import { createApiApp } from './src/apiApp';
+import { createApiApp, attachSafetyNetErrorHandler, dbState, requireAuth } from './src/apiApp';
+import { registerAiRoutes } from './src/aiRoutes';
 
 /**
  * Standalone entry point for local development and any traditional Node
- * host (Cloud Run, a VM, etc.) — wraps createApiApp() with the Vite dev
- * middleware (or the built static frontend in production) and starts
- * listening.
+ * host (Cloud Run, a VM, etc.) — wraps createApiApp() with the AI routes,
+ * the Vite dev middleware (or the built static frontend in production),
+ * and starts listening.
  *
  * Not used on Vercel, and not merely skipped there — api/index.ts imports
  * createApiApp() from src/apiApp.ts directly, never through this file, so
- * this file (and the dynamic `import('vite')` below) is entirely outside
- * the Vercel serverless function's dependency graph. See src/apiApp.ts's
- * file header for why that separation matters.
+ * this file (and the dynamic `import('vite')` below, and the AI routes'
+ * `@google/genai` dependency pulled in via aiRoutes.ts) is entirely
+ * outside the Vercel serverless function's dependency graph. See
+ * src/apiApp.ts's and src/aiRoutes.ts's file headers for why that
+ * separation matters. On Vercel, AI routes are their own function:
+ * api/ai.ts.
  */
 async function startServer() {
   const app = createApiApp();
+  registerAiRoutes(app, { dbState, requireAuth });
+  // Must run after every route is registered — including the AI routes
+  // just added above — see attachSafetyNetErrorHandler()'s doc comment.
+  attachSafetyNetErrorHandler(app);
+
   const PORT = process.env.PORT ? Number(process.env.PORT) : 3000;
 
   // Vite middleware for development vs static build in production
