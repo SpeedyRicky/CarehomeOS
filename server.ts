@@ -1185,6 +1185,23 @@ Provide an accurate, concise answer with timestamps, aliases, and regulatory ref
     }
   });
 
+  // Safety-net error handler: converts any error that reaches here (a
+  // synchronous throw in a route handler, or an explicit next(err) call)
+  // into a clean JSON 500 instead of Express's default HTML error page.
+  // That distinction matters concretely here — the client always does
+  // `await res.json()` on the response (see src/App.tsx / LoginView.tsx),
+  // and parsing an HTML error page throws a SyntaxError that surfaces as a
+  // generic "Could not reach the server" message, hiding the real failure
+  // exactly as happened during the Vercel deployment issues above. Must be
+  // registered last, after every route, and must keep all four parameters
+  // (err, req, res, next) — Express identifies error-handling middleware
+  // by that arity alone, regardless of whether `next` is used in the body.
+  app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
+    console.error(`[api] Unhandled error on ${req.method} ${req.path}:`, err);
+    if (res.headersSent) return next(err);
+    res.status(500).json({ error: 'An unexpected server error occurred.', detail: err?.message || String(err) });
+  });
+
   return app;
 }
 

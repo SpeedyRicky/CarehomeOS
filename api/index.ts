@@ -23,6 +23,30 @@
 // Vercel deployment of this app as a login/UI demo only until the data
 // layer moves to a real database (see ARCHITECTURE.md "Prototype →
 // Production").
+import type { Request, Response } from 'express';
 import { createApiApp } from '../server';
 
-export default createApiApp();
+// createApiApp() runs at module-load time (before any request lands), so a
+// throw here is exactly the class of bug that produced the login 500 this
+// file previously shipped with (a stray `import.meta.url` reference that
+// only broke under Vercel's CJS compilation): a crash Vercel surfaces as a
+// generic, non-JSON error page rather than a diagnosable response. Loading
+// it inside a try/catch turns "module fails to load" into a normal JSON
+// 500 (with the real error logged to Vercel's function logs) instead of a
+// blank crash — cheap insurance against the exact failure mode already
+// hit twice in production.
+let handler: (req: Request, res: Response) => void;
+
+try {
+  handler = createApiApp();
+} catch (err: any) {
+  console.error('[api] createApiApp() failed to initialize:', err);
+  handler = (_req, res) => {
+    res.status(500).json({
+      error: 'CareHomeOS API failed to start. Check the Vercel function logs for the underlying error.',
+      detail: err?.message || String(err),
+    });
+  };
+}
+
+export default handler;
