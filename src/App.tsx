@@ -1,8 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { ShieldAlert } from 'lucide-react';
 import { Header } from './components/Header';
+import { LoginView } from './components/LoginView';
 import { TodayView } from './components/TodayView';
-import { ScheduleView } from './components/ScheduleView';
 import { EMARView } from './components/EMARView';
 import { IncidentsView } from './components/IncidentsView';
 import { ResidentsView } from './components/ResidentsView';
@@ -16,7 +16,6 @@ import { DailyReportModal } from './components/DailyReportModal';
 import { ShiftChecklistModal } from './components/ShiftChecklistModal';
 import {
   INITIAL_STAFF,
-  INITIAL_SHIFTS,
   INITIAL_SHIFT_ASSIGNMENTS,
   INITIAL_RESIDENTS,
   INITIAL_PROSPECTS,
@@ -30,12 +29,9 @@ import {
   INITIAL_AUDIT_EVENTS,
   INITIAL_NOTIFICATIONS,
   INITIAL_RULESET,
-  INITIAL_SHIFT_CHANGE_REQUESTS,
-  INITIAL_TIME_ENTRIES,
 } from './seedData';
 import {
   Staff,
-  Shift,
   ShiftAssignment,
   Resident,
   Prospect,
@@ -48,43 +44,17 @@ import {
   IncidentReport,
   AuditEvent,
   NotificationItem,
-  ShiftChangeRequest,
-  ShiftChangeRequestType,
-  TimeEntry,
 } from './types';
-import { getBlockedTabsForRole } from './roleAccess';
-
-const TOKEN_STORAGE_KEY = 'carehomeos_token';
-const SELECTED_STAFF_EMAIL_KEY = 'carehomeos_selected_staff_email';
-
-// TEMPORARY: the login screen is disabled for now (product decision — see
-// PR history) while the login UX gets simplified; the real backend
-// authentication in src/apiApp.ts (password hashing, MFA, session tokens)
-// is untouched and still runs underneath. Switching users below performs
-// a real /api/auth/login call with these known seed demo credentials
-// (src/seedData.auth.ts) rather than bypassing auth — re-enabling a login
-// screen later just means rendering one in place of the auto-login call
-// below and reusing handleLoginSuccess exactly as-is.
-const DEMO_PASSWORD = 'Demo@CareHome1';
-const DEMO_MFA_CODE = '123456';
-const DEFAULT_STAFF_EMAIL = 'sarah.j@hihavenmanor.ca';
 
 export default function App() {
   // Navigation
   const [activeTab, setActiveTab] = useState<string>('today');
 
-  // Auth state. Real session tokens still back every request (see
-  // SECURITY.md) — there's just no login screen right now (see
-  // DEMO_PASSWORD's comment above); auto-login stands in for it.
-  const [authToken, setAuthToken] = useState<string | null>(() =>
-    typeof window !== 'undefined' ? window.localStorage.getItem(TOKEN_STORAGE_KEY) : null
-  );
-  const [currentStaff, setCurrentStaff] = useState<Staff | null>(null);
-  const [authChecked, setAuthChecked] = useState(false);
-
   // Core domain state (initialized with seed, synced with server API)
   const [staffList, setStaffList] = useState<Staff[]>(INITIAL_STAFF);
-  const [shifts, setShifts] = useState<Shift[]>(INITIAL_SHIFTS);
+  // No default staff — the app starts logged out. See LoginView.tsx for the
+  // hardcoded demo accounts (one per role) that set this on sign-in.
+  const [currentStaff, setCurrentStaff] = useState<Staff | null>(null);
   const [shiftAssignments, setShiftAssignments] = useState<ShiftAssignment[]>(INITIAL_SHIFT_ASSIGNMENTS);
   const [residents, setResidents] = useState<Resident[]>(INITIAL_RESIDENTS);
   const [prospects, setProspects] = useState<Prospect[]>(INITIAL_PROSPECTS);
@@ -98,8 +68,6 @@ export default function App() {
   const [auditEvents, setAuditEvents] = useState<AuditEvent[]>(INITIAL_AUDIT_EVENTS);
   const [notifications, setNotifications] = useState<NotificationItem[]>(INITIAL_NOTIFICATIONS);
   const [ruleset, setRuleset] = useState(INITIAL_RULESET);
-  const [shiftChangeRequests, setShiftChangeRequests] = useState<ShiftChangeRequest[]>(INITIAL_SHIFT_CHANGE_REQUESTS);
-  const [timeEntries, setTimeEntries] = useState<TimeEntry[]>(INITIAL_TIME_ENTRIES);
 
   // Modals state
   const [isNewIncidentOpen, setIsNewIncidentOpen] = useState(false);
@@ -111,131 +79,72 @@ export default function App() {
 
   const [isShiftChecklistOpen, setIsShiftChecklistOpen] = useState(false);
 
-  const authFetch = (url: string, options: RequestInit = {}, tokenOverride?: string) =>
-    fetch(url, {
-      ...options,
-      headers: {
-        ...(options.headers || {}),
-        ...((tokenOverride || authToken) ? { Authorization: `Bearer ${tokenOverride || authToken}` } : {}),
-      },
-    });
-
-  const loadOrgState = async (tokenOverride?: string) => {
-    const res = await authFetch('/api/state', {}, tokenOverride);
-    if (!res.ok) return;
-    const data = await res.json();
-    if (data.staff) setStaffList(data.staff);
-    if (data.shifts) setShifts(data.shifts);
-    if (data.shiftAssignments) setShiftAssignments(data.shiftAssignments);
-    if (data.residents) setResidents(data.residents);
-    if (data.prospects) setProspects(data.prospects);
-    if (data.carePlans) setCarePlans(data.carePlans);
-    if (data.reassessments) setReassessments(data.reassessments);
-    if (data.medOrders) setMedOrders(data.medOrders);
-    if (data.medAdmins) setMedAdmins(data.medAdmins);
-    if (data.dailyReports) setDailyReports(data.dailyReports);
-    if (data.shiftChecklists) setShiftChecklists(data.shiftChecklists);
-    if (data.incidents) setIncidents(data.incidents);
-    if (data.auditEvents) setAuditEvents(data.auditEvents);
-    if (data.notifications) setNotifications(data.notifications);
-    if (data.ruleset) setRuleset(data.ruleset);
-    if (data.shiftChangeRequests) setShiftChangeRequests(data.shiftChangeRequests);
-    if (data.timeEntries) setTimeEntries(data.timeEntries);
-  };
-
-  // Signs in as the given staff member's real account via a genuine
-  // /api/auth/login call (the known seed demo password/MFA code from
-  // src/seedData.auth.ts) — this is a stand-in for a login screen, not a
-  // bypass of authentication itself. Every request still carries a real
-  // session token and the server still enforces requireAuth/requireRole on
-  // every endpoint exactly as before.
-  const loginAsEmail = async (email: string): Promise<boolean> => {
-    try {
-      const res = await fetch('/api/auth/login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, password: DEMO_PASSWORD, mfaCode: DEMO_MFA_CODE }),
-      });
-      if (!res.ok) return false;
-      const data = await res.json();
-      window.localStorage.setItem(TOKEN_STORAGE_KEY, data.token);
-      window.localStorage.setItem(SELECTED_STAFF_EMAIL_KEY, email);
-      setAuthToken(data.token);
-      setCurrentStaff(data.staff);
-      await loadOrgState(data.token);
-      return true;
-    } catch (err) {
-      console.error(err);
-      return false;
-    }
-  };
-
-  // Resolve the current session on mount: reuse an existing token if one is
-  // still valid, otherwise silently sign in as the last-selected (or
-  // default) staff member. See DEMO_PASSWORD's comment above — the login
-  // screen is temporarily disabled, not the underlying auth.
+  // Fetch initial state from server
   useEffect(() => {
-    async function resolveSessionAndLoadState() {
+    async function loadServerState() {
       try {
-        if (authToken) {
-          const meRes = await authFetch('/api/auth/me');
-          if (meRes.ok) {
-            const meData = await meRes.json();
-            setCurrentStaff(meData.staff);
-            await loadOrgState();
-            return;
-          }
-          window.localStorage.removeItem(TOKEN_STORAGE_KEY);
-          setAuthToken(null);
+        const res = await fetch('/api/state');
+        if (res.ok) {
+          const data = await res.json();
+          if (data.staff) setStaffList(data.staff);
+          if (data.shiftAssignments) setShiftAssignments(data.shiftAssignments);
+          if (data.residents) setResidents(data.residents);
+          if (data.prospects) setProspects(data.prospects);
+          if (data.carePlans) setCarePlans(data.carePlans);
+          if (data.reassessments) setReassessments(data.reassessments);
+          if (data.medOrders) setMedOrders(data.medOrders);
+          if (data.medAdmins) setMedAdmins(data.medAdmins);
+          if (data.dailyReports) setDailyReports(data.dailyReports);
+          if (data.shiftChecklists) setShiftChecklists(data.shiftChecklists);
+          if (data.incidents) setIncidents(data.incidents);
+          if (data.auditEvents) setAuditEvents(data.auditEvents);
+          if (data.notifications) setNotifications(data.notifications);
+          if (data.ruleset) setRuleset(data.ruleset);
         }
-        const rememberedEmail = window.localStorage.getItem(SELECTED_STAFF_EMAIL_KEY) || DEFAULT_STAFF_EMAIL;
-        await loginAsEmail(rememberedEmail);
       } catch (err) {
         console.warn('Using client memory state:', err);
-      } finally {
-        setAuthChecked(true);
       }
     }
-    resolveSessionAndLoadState();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    loadServerState();
   }, []);
 
-  const blockedTabs = getBlockedTabsForRole(currentStaff?.role);
+  const activeAssignment = shiftAssignments.find(
+    (a) => a.staff_id === currentStaff?.id && a.is_active
+  );
 
-  // Automatically divert staff away from modules their role can't access
+  const isCareWorker = currentStaff?.role === 'Care Worker';
+  // Owner sees everything Manager does, plus the CRM Pipeline — Manager and
+  // Care Worker do not get CRM access.
+  const isOwner = currentStaff?.role === 'Owner';
+  const restrictedTabs = ['reassessments', 'crm', 'compliance'];
+
+  // Automatically divert Care Workers away from restricted modules, and
+  // Managers away from the Owner-only CRM Pipeline.
   useEffect(() => {
-    if (blockedTabs.includes(activeTab)) {
+    if (isCareWorker && restrictedTabs.includes(activeTab)) {
+      setActiveTab('today');
+    } else if (!isOwner && !isCareWorker && activeTab === 'crm') {
       setActiveTab('today');
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentStaff?.role, activeTab]);
+  }, [isCareWorker, isOwner, activeTab]);
 
-  const handleSwitchUser = (staff: Staff) => {
-    loginAsEmail(staff.email);
-  };
-
-  if (!authChecked || !currentStaff) {
-    return (
-      <div className="min-h-screen bg-slate-950 flex items-center justify-center text-slate-400 text-sm">
-        Loading CareHomeOS…
-      </div>
-    );
+  // Not logged in yet — show the login gate. Placed after every hook above
+  // (React requires hooks to run in the same order on every render) so
+  // everything below this point can safely treat currentStaff as non-null.
+  if (!currentStaff) {
+    return <LoginView allStaff={staffList} onLogin={setCurrentStaff} />;
   }
-
-  const activeAssignment = shiftAssignments.find(
-    (a) => a.staff_id === currentStaff.id && a.is_active
-  );
 
   // Clock In / Out Toggle Handler
   const handleClockToggle = async () => {
     const action = activeAssignment?.is_active ? 'clock_out' : 'clock_in';
     try {
-      const res = await authFetch('/api/shifts/clock', {
+      const res = await fetch('/api/shifts/clock', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           staffId: currentStaff.id,
-          shiftId: activeAssignment?.shift_id || 'shift-day-today',
+          shiftId: 'shift-day-today',
           action,
         }),
       });
@@ -249,59 +158,24 @@ export default function App() {
           }
           return filtered;
         });
-        if (data.timeEntry) {
-          setTimeEntries((prev) => [data.timeEntry, ...prev]);
-        }
       }
     } catch (err) {
       console.error(err);
     }
   };
 
-  // Submit a shift change request (swap / cover / time off)
-  const handleSubmitShiftChangeRequest = async (payload: {
-    shiftAssignmentId: string;
-    requestType: ShiftChangeRequestType;
-    targetStaffId: string | null;
-    reason: string;
-  }) => {
-    try {
-      const res = await authFetch('/api/shift-change-requests', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      });
-      if (res.ok) {
-        const data = await res.json();
-        setShiftChangeRequests((prev) => [data.request, ...prev]);
-      }
-    } catch (err) {
-      console.error(err);
+  // Switch Active Staff Member (Demonstrates RBAC & Segregation of Duties)
+  const handleSelectStaff = (staff: Staff) => {
+    setCurrentStaff(staff);
+    if (staff.role === 'Care Worker' && restrictedTabs.includes(activeTab)) {
+      setActiveTab('today');
     }
   };
 
-  // Manager/Owner review of a shift change request (approve / deny)
-  const handleReviewShiftChangeRequest = async (payload: {
-    requestId: string;
-    action: 'approve' | 'deny';
-    reviewNotes?: string;
-  }) => {
-    try {
-      const res = await authFetch(`/api/shift-change-requests/${payload.requestId}/review`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: payload.action, reviewNotes: payload.reviewNotes }),
-      });
-      if (res.ok) {
-        const data = await res.json();
-        setShiftChangeRequests((prev) => prev.map((r) => (r.id === data.request.id ? data.request : r)));
-      } else {
-        const err = await res.json();
-        alert(err.error || 'Review failed');
-      }
-    } catch (err) {
-      console.error(err);
-    }
+  // Sign out back to the login screen
+  const handleLogout = () => {
+    setCurrentStaff(null);
+    setActiveTab('today');
   };
 
   // Notification read toggle
@@ -324,7 +198,7 @@ export default function App() {
     scheduledTime: string;
   }) => {
     try {
-      const res = await authFetch('/api/emar/administer', {
+      const res = await fetch('/api/emar/administer', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
@@ -355,7 +229,7 @@ export default function App() {
   // Save Daily Shift Report
   const handleSaveDailyReport = async (report: DailyReport) => {
     try {
-      const res = await authFetch('/api/daily-reports', {
+      const res = await fetch('/api/daily-reports', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(report),
@@ -392,7 +266,7 @@ export default function App() {
   // Save End-of-Shift Safety & Medication Checklist
   const handleSaveShiftChecklist = async (checklist: ShiftChecklist) => {
     try {
-      const res = await authFetch('/api/shift-checklists', {
+      const res = await fetch('/api/shift-checklists', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(checklist),
@@ -422,7 +296,7 @@ export default function App() {
   // Submit Incident Report (Taxonomy Form)
   const handleSubmitIncident = async (incident: IncidentReport) => {
     try {
-      const res = await authFetch('/api/incidents/submit', {
+      const res = await fetch('/api/incidents/submit', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(incident),
@@ -474,7 +348,7 @@ export default function App() {
     rejectionReason?: string;
   }) => {
     try {
-      const res = await authFetch('/api/incidents/review', {
+      const res = await fetch('/api/incidents/review', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(data),
@@ -514,7 +388,7 @@ export default function App() {
     newCarePlanCreated: boolean;
   }) => {
     try {
-      const res = await authFetch('/api/reassessments/complete', {
+      const res = await fetch('/api/reassessments/complete', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(data),
@@ -558,7 +432,7 @@ export default function App() {
     actorName: string;
   }) => {
     try {
-      const res = await authFetch('/api/prospects/convert', {
+      const res = await fetch('/api/prospects/convert', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(data),
@@ -612,11 +486,12 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-slate-100 text-slate-900 flex flex-col font-sans selection:bg-emerald-500 selection:text-white">
-      {/* Top App Header */}
+      {/* Top App Header & Shift/Role Switcher */}
       <Header
         currentStaff={currentStaff}
         allStaff={staffList}
-        onSelectStaff={handleSwitchUser}
+        onSelectStaff={handleSelectStaff}
+        onLogout={handleLogout}
         activeAssignment={activeAssignment}
         onClockToggle={handleClockToggle}
         notifications={notifications}
@@ -650,19 +525,6 @@ export default function App() {
             }}
             onOpenShiftChecklist={() => setIsShiftChecklistOpen(true)}
             onNavigateToAI={() => setActiveTab('ai')}
-          />
-        )}
-
-        {activeTab === 'schedule' && (
-          <ScheduleView
-            currentStaff={currentStaff}
-            allStaff={staffList}
-            shifts={shifts}
-            shiftAssignments={shiftAssignments}
-            shiftChangeRequests={shiftChangeRequests}
-            timeEntries={timeEntries}
-            onSubmitShiftChangeRequest={handleSubmitShiftChangeRequest}
-            onReviewShiftChangeRequest={handleReviewShiftChangeRequest}
           />
         )}
 
@@ -714,7 +576,7 @@ export default function App() {
           />
         )}
 
-        {activeTab === 'reassessments' && !blockedTabs.includes('reassessments') && (
+        {activeTab === 'reassessments' && !isCareWorker && (
           <ReassessmentsView
             reassessments={reassessments}
             residents={residents}
@@ -723,7 +585,7 @@ export default function App() {
           />
         )}
 
-        {activeTab === 'crm' && !blockedTabs.includes('crm') && (
+        {activeTab === 'crm' && isOwner && (
           <CRMView
             prospects={prospects}
             currentStaff={currentStaff}
@@ -731,7 +593,7 @@ export default function App() {
           />
         )}
 
-        {activeTab === 'compliance' && !blockedTabs.includes('compliance') && (
+        {activeTab === 'compliance' && !isCareWorker && (
           <ComplianceView
             ruleset={ruleset}
             staff={staffList}
@@ -743,7 +605,7 @@ export default function App() {
           />
         )}
 
-        {blockedTabs.includes(activeTab) && (
+        {((restrictedTabs.includes(activeTab) && isCareWorker) || (activeTab === 'crm' && !isOwner)) && (
           <div className="bg-white rounded-xl border border-slate-200 p-8 sm:p-12 text-center space-y-4 shadow-xs max-w-lg mx-auto my-12">
             <div className="w-14 h-14 rounded-full bg-rose-100 text-rose-600 flex items-center justify-center mx-auto">
               <ShieldAlert className="w-7 h-7" />
@@ -752,9 +614,9 @@ export default function App() {
               <h2 className="text-base font-bold text-slate-900">Access Restricted</h2>
               <p className="text-xs text-slate-600 mt-1.5 leading-relaxed">
                 You are currently signed in as <strong>{currentStaff.name}</strong> ({currentStaff.role}).{' '}
-                {currentStaff.role === 'Care Worker'
-                  ? 'Care Workers are restricted from Reassessments, CRM Pipeline, and Regulatory Compliance. These require Supervisor-level access or higher.'
-                  : 'CRM Pipeline and Regulatory Compliance require Manager or Owner administrative privileges.'}
+                {isCareWorker
+                  ? 'Care Workers are restricted from accessing Reassessments, CRM Pipeline, and Regulatory Compliance pages. These modules require Manager or Owner administrative privileges.'
+                  : 'The CRM Pipeline is restricted to the Owner role.'}
               </p>
             </div>
             <button

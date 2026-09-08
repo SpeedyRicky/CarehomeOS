@@ -30,9 +30,8 @@
 // not share state at all. Login itself works fine (credentials are static
 // seed data), but any write (clock in/out, incidents, shift-change
 // requests, etc.) is not guaranteed to persist or be visible across
-// requests on Vercel. Treat a Vercel deployment of this app as a login/UI
-// demo only until the data layer moves to a real database (see
-// ARCHITECTURE.md "Prototype → Production").
+// requests on Vercel. Treat a Vercel deployment of this app as a UI demo
+// only until the data layer moves to a real database.
 // IMPORTANT: this file must never import anything that itself references
 // `@google/genai` (directly or transitively) — see src/aiRoutes.ts's file
 // header. AI features are their own separate function: api/ai.ts.

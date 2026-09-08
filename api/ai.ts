@@ -16,17 +16,16 @@
 // data as api/index.ts's — Vercel serverless functions don't share memory
 // across separate functions (or even across separate invocations of the
 // same function) regardless, so AI summaries here reflect seed data, not
-// live writes made through api/index.ts. See ARCHITECTURE.md "Prototype →
-// Production".
+// live writes made through api/index.ts.
 import express from 'express';
 import type { Request, Response } from 'express';
-import { dbState, requireAuth, attachSafetyNetErrorHandler } from '../src/apiApp';
+import { dbState, attachSafetyNetErrorHandler } from '../src/apiApp';
 import { registerAiRoutes } from '../src/aiRoutes';
 
 function createAiApiApp(): express.Express {
   const app = express();
   app.use(express.json());
-  registerAiRoutes(app, { dbState, requireAuth });
+  registerAiRoutes(app, { dbState });
   attachSafetyNetErrorHandler(app);
   return app;
 }
