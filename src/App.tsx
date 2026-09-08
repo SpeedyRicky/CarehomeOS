@@ -11,11 +11,14 @@ import { CRMView } from './components/CRMView';
 import { ComplianceView } from './components/ComplianceView';
 import { AuditLogView } from './components/AuditLogView';
 import { AIAssistantView } from './components/AIAssistantView';
+import { OwnerDashboardView } from './components/OwnerDashboardView';
+import { ManagerDashboardView } from './components/ManagerDashboardView';
 import { NewIncidentModal } from './components/NewIncidentModal';
 import { DailyReportModal } from './components/DailyReportModal';
 import { ShiftChecklistModal } from './components/ShiftChecklistModal';
 import {
   INITIAL_STAFF,
+  INITIAL_SHIFTS,
   INITIAL_SHIFT_ASSIGNMENTS,
   INITIAL_RESIDENTS,
   INITIAL_PROSPECTS,
@@ -29,9 +32,13 @@ import {
   INITIAL_AUDIT_EVENTS,
   INITIAL_NOTIFICATIONS,
   INITIAL_RULESET,
+  INITIAL_HOME,
+  INITIAL_TASK_DEFINITIONS,
+  INITIAL_SHIFT_TASK_TEMPLATES,
 } from './seedData';
 import {
   Staff,
+  Shift,
   ShiftAssignment,
   Resident,
   Prospect,
@@ -44,6 +51,10 @@ import {
   IncidentReport,
   AuditEvent,
   NotificationItem,
+  TaskDefinition,
+  ShiftTaskTemplate,
+  ShiftTaskAssignment,
+  ExceptionRecord,
 } from './types';
 
 export default function App() {
@@ -55,6 +66,7 @@ export default function App() {
   // No default staff — the app starts logged out. See LoginView.tsx for the
   // hardcoded demo accounts (one per role) that set this on sign-in.
   const [currentStaff, setCurrentStaff] = useState<Staff | null>(null);
+  const [shifts, setShifts] = useState<Shift[]>(INITIAL_SHIFTS);
   const [shiftAssignments, setShiftAssignments] = useState<ShiftAssignment[]>(INITIAL_SHIFT_ASSIGNMENTS);
   const [residents, setResidents] = useState<Resident[]>(INITIAL_RESIDENTS);
   const [prospects, setProspects] = useState<Prospect[]>(INITIAL_PROSPECTS);
@@ -68,6 +80,13 @@ export default function App() {
   const [auditEvents, setAuditEvents] = useState<AuditEvent[]>(INITIAL_AUDIT_EVENTS);
   const [notifications, setNotifications] = useState<NotificationItem[]>(INITIAL_NOTIFICATIONS);
   const [ruleset, setRuleset] = useState(INITIAL_RULESET);
+  const [home, setHome] = useState(INITIAL_HOME);
+
+  // Scheduling & shared shift tasks
+  const [taskDefinitions, setTaskDefinitions] = useState<TaskDefinition[]>(INITIAL_TASK_DEFINITIONS);
+  const [shiftTaskTemplates, setShiftTaskTemplates] = useState<ShiftTaskTemplate[]>(INITIAL_SHIFT_TASK_TEMPLATES);
+  const [shiftTasks, setShiftTasks] = useState<ShiftTaskAssignment[]>([]);
+  const [exceptions, setExceptions] = useState<ExceptionRecord[]>([]);
 
   // Modals state
   const [isNewIncidentOpen, setIsNewIncidentOpen] = useState(false);
@@ -79,6 +98,36 @@ export default function App() {
 
   const [isShiftChecklistOpen, setIsShiftChecklistOpen] = useState(false);
 
+  // Fetch today's shared shift-task board — a separate endpoint (rather than
+  // part of /api/state) because reading it is what triggers the server to
+  // generate today's task instances from whichever staff are scheduled.
+  const loadShiftTasks = async () => {
+    try {
+      const res = await fetch('/api/shift-tasks');
+      if (res.ok) {
+        const data = await res.json();
+        if (data.shiftTasks) setShiftTasks(data.shiftTasks);
+      }
+    } catch (err) {
+      console.warn('Could not load shift tasks:', err);
+    }
+  };
+
+  // Fetch detected exceptions — computed fresh server-side from live data
+  // (missed tasks, missed meds, overdue reassessments, expiring
+  // credentials, understaffed shifts), not stored records.
+  const loadExceptions = async () => {
+    try {
+      const res = await fetch('/api/exceptions');
+      if (res.ok) {
+        const data = await res.json();
+        if (data.exceptions) setExceptions(data.exceptions);
+      }
+    } catch (err) {
+      console.warn('Could not load exceptions:', err);
+    }
+  };
+
   // Fetch initial state from server
   useEffect(() => {
     async function loadServerState() {
@@ -87,6 +136,7 @@ export default function App() {
         if (res.ok) {
           const data = await res.json();
           if (data.staff) setStaffList(data.staff);
+          if (data.shifts) setShifts(data.shifts);
           if (data.shiftAssignments) setShiftAssignments(data.shiftAssignments);
           if (data.residents) setResidents(data.residents);
           if (data.prospects) setProspects(data.prospects);
@@ -100,10 +150,15 @@ export default function App() {
           if (data.auditEvents) setAuditEvents(data.auditEvents);
           if (data.notifications) setNotifications(data.notifications);
           if (data.ruleset) setRuleset(data.ruleset);
+          if (data.home) setHome(data.home);
+          if (data.taskDefinitions) setTaskDefinitions(data.taskDefinitions);
+          if (data.shiftTaskTemplates) setShiftTaskTemplates(data.shiftTaskTemplates);
         }
       } catch (err) {
         console.warn('Using client memory state:', err);
       }
+      loadShiftTasks();
+      loadExceptions();
     }
     loadServerState();
   }, []);
@@ -113,17 +168,17 @@ export default function App() {
   );
 
   const isCareWorker = currentStaff?.role === 'Care Worker';
-  // Owner sees everything Manager does, plus the CRM Pipeline — Manager and
-  // Care Worker do not get CRM access.
+  // Owner sees everything Manager does, plus the CRM Pipeline and the
+  // Owner Dashboard — Manager and Care Worker do not get those.
   const isOwner = currentStaff?.role === 'Owner';
-  const restrictedTabs = ['reassessments', 'crm', 'compliance'];
+  const restrictedTabs = ['reassessments', 'crm', 'compliance', 'manager-dashboard'];
 
   // Automatically divert Care Workers away from restricted modules, and
-  // Managers away from the Owner-only CRM Pipeline.
+  // non-Owners away from the Owner-only CRM Pipeline and Owner Dashboard.
   useEffect(() => {
     if (isCareWorker && restrictedTabs.includes(activeTab)) {
       setActiveTab('today');
-    } else if (!isOwner && !isCareWorker && activeTab === 'crm') {
+    } else if (!isOwner && (activeTab === 'crm' || activeTab === 'owner-dashboard')) {
       setActiveTab('today');
     }
   }, [isCareWorker, isOwner, activeTab]);
@@ -484,6 +539,101 @@ export default function App() {
     }
   };
 
+  // Claim / Complete / Skip a shared shift task
+  const handleClaimTask = async (taskId: string) => {
+    try {
+      const res = await fetch(`/api/shift-tasks/${taskId}/claim`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ staffId: currentStaff.id, staffName: currentStaff.name }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setShiftTasks((prev) => prev.map((t) => (t.id === taskId ? data.task : t)));
+      }
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  const handleCompleteTask = async (taskId: string) => {
+    try {
+      const res = await fetch(`/api/shift-tasks/${taskId}/complete`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ staffId: currentStaff.id, staffName: currentStaff.name }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setShiftTasks((prev) => prev.map((t) => (t.id === taskId ? data.task : t)));
+        loadExceptions();
+      }
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  const handleSkipTask = async (taskId: string, reason: string) => {
+    try {
+      const res = await fetch(`/api/shift-tasks/${taskId}/skip`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ staffId: currentStaff.id, staffName: currentStaff.name, reason }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setShiftTasks((prev) => prev.map((t) => (t.id === taskId ? data.task : t)));
+        loadExceptions();
+      }
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  // Acknowledge / Resolve a detected exception (Manager/Owner)
+  const handleReviewException = async (
+    exceptionId: string,
+    status: 'acknowledged' | 'resolved',
+    correctiveAction?: string
+  ) => {
+    try {
+      const res = await fetch(`/api/exceptions/${exceptionId}/review`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ actorId: currentStaff.id, status, correctiveAction }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.exceptions) setExceptions(data.exceptions);
+      }
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  // Owner: toggle whether a task occurs on a given shift type
+  const handleToggleShiftTaskTemplate = async (template: ShiftTaskTemplate) => {
+    const updated = { ...template, is_active: !template.is_active };
+    try {
+      const res = await fetch('/api/shift-task-templates', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ actorId: currentStaff.id, shiftTaskTemplate: updated }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setShiftTaskTemplates((prev) =>
+          prev.map((t) => (t.id === template.id ? data.shiftTaskTemplate : t))
+        );
+      } else {
+        const err = await res.json();
+        alert(err.error || 'Could not update shift task setup.');
+      }
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
   return (
     <div className="min-h-screen bg-slate-100 text-slate-900 flex flex-col font-sans selection:bg-emerald-500 selection:text-white">
       {/* Top App Header & Shift/Role Switcher */}
@@ -511,6 +661,7 @@ export default function App() {
             medAdmins={medAdmins}
             dailyReports={dailyReports}
             shiftChecklists={shiftChecklists}
+            shiftTasks={shiftTasks}
             onOpenMedPass={(order, resident) => {
               setActiveTab('emar');
             }}
@@ -525,6 +676,39 @@ export default function App() {
             }}
             onOpenShiftChecklist={() => setIsShiftChecklistOpen(true)}
             onNavigateToAI={() => setActiveTab('ai')}
+            onClaimTask={handleClaimTask}
+            onCompleteTask={handleCompleteTask}
+            onSkipTask={handleSkipTask}
+          />
+        )}
+
+        {activeTab === 'owner-dashboard' && isOwner && (
+          <OwnerDashboardView
+            home={home}
+            residents={residents}
+            staff={staffList}
+            shifts={shifts}
+            shiftAssignments={shiftAssignments}
+            incidents={incidents}
+            taskDefinitions={taskDefinitions}
+            shiftTaskTemplates={shiftTaskTemplates}
+            exceptions={exceptions}
+            onToggleShiftTaskTemplate={handleToggleShiftTaskTemplate}
+          />
+        )}
+
+        {activeTab === 'manager-dashboard' && !isCareWorker && (
+          <ManagerDashboardView
+            currentStaff={currentStaff}
+            residents={residents}
+            incidents={incidents}
+            reassessments={reassessments}
+            dailyReports={dailyReports}
+            shiftTasks={shiftTasks}
+            exceptions={exceptions}
+            onReviewException={handleReviewException}
+            onNavigateToIncidents={() => setActiveTab('incidents')}
+            onNavigateToTasks={() => setActiveTab('today')}
           />
         )}
 
@@ -605,7 +789,8 @@ export default function App() {
           />
         )}
 
-        {((restrictedTabs.includes(activeTab) && isCareWorker) || (activeTab === 'crm' && !isOwner)) && (
+        {((restrictedTabs.includes(activeTab) && isCareWorker) ||
+          ((activeTab === 'crm' || activeTab === 'owner-dashboard') && !isOwner)) && (
           <div className="bg-white rounded-xl border border-slate-200 p-8 sm:p-12 text-center space-y-4 shadow-xs max-w-lg mx-auto my-12">
             <div className="w-14 h-14 rounded-full bg-rose-100 text-rose-600 flex items-center justify-center mx-auto">
               <ShieldAlert className="w-7 h-7" />
@@ -615,8 +800,8 @@ export default function App() {
               <p className="text-xs text-slate-600 mt-1.5 leading-relaxed">
                 You are currently signed in as <strong>{currentStaff.name}</strong> ({currentStaff.role}).{' '}
                 {isCareWorker
-                  ? 'Care Workers are restricted from accessing Reassessments, CRM Pipeline, and Regulatory Compliance pages. These modules require Manager or Owner administrative privileges.'
-                  : 'The CRM Pipeline is restricted to the Owner role.'}
+                  ? 'Care Workers are restricted from accessing the Manager Dashboard, Reassessments, CRM Pipeline, and Regulatory Compliance pages. These modules require Manager or Owner administrative privileges.'
+                  : 'The Owner Dashboard and CRM Pipeline are restricted to the Owner role.'}
               </p>
             </div>
             <button

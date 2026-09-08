@@ -42,6 +42,9 @@ export interface Shift {
   shift_type: 'Day Shift (07:00 - 19:00)' | 'Night Shift (19:00 - 07:00)' | 'Manager Schedule (Mon-Fri 09:00 - 15:00)';
   starts_at: string;
   ends_at: string;
+  // How many staff should be on this shift at once. Drives the
+  // "understaffed_shift" exception — owner-adjustable via seed data for now.
+  required_staff_count: number;
 }
 
 export interface ShiftAssignment {
@@ -280,4 +283,104 @@ export interface NotificationItem {
   created_at: string;
   read: boolean;
   urgency: 'routine' | 'high' | 'critical';
+}
+
+// ==========================================
+// SCHEDULING & SHARED SHIFT TASKS
+//
+// A community care home shift isn't one person doing everything for one
+// resident — it's 2-3 staff on days (one does showers, another does meds
+// or breakfast) and usually one on nights (meds + cleaning + hourly
+// walkthroughs). Tasks aren't rigidly pre-assigned to a specific staff
+// member; they're generated for the shift/date and whoever is on duty
+// claims and completes them. The owner controls which tasks apply to
+// which shift type via ShiftTaskTemplate.
+// ==========================================
+
+export type TaskCategory = 'resident_care' | 'medication' | 'meal' | 'cleaning' | 'safety_check' | 'admin';
+
+export interface TaskDefinition {
+  id: string;
+  home_id: string;
+  name: string; // e.g. "Assist with Shower", "Prepare Breakfast", "Hourly Safety Walkthrough"
+  category: TaskCategory;
+  // Resident-specific tasks (e.g. a shower) generate one instance per active
+  // resident; home-level tasks (e.g. cleaning, breakfast prep) generate one
+  // shared instance any staff on shift can claim.
+  applies_to: 'resident' | 'home';
+  // 'once' generates a single instance for the shift; 'hourly' generates
+  // one instance per hour of the shift's duration (e.g. safety walkthroughs).
+  frequency: 'once' | 'hourly';
+  is_active: boolean;
+}
+
+// Which tasks the owner has configured to occur on which shift type. This
+// is the "owner should be able to adjust tasks" control surface — toggling
+// a row on/off changes what gets generated for future shifts.
+export interface ShiftTaskTemplate {
+  id: string;
+  home_id: string;
+  shift_type: Shift['shift_type'];
+  task_definition_id: string;
+  is_active: boolean;
+}
+
+export type ShiftTaskStatus = 'pending' | 'claimed' | 'completed' | 'skipped' | 'missed';
+
+// One generated instance of a task for a specific shift + date, optionally
+// scoped to a resident. Generated automatically from ShiftTaskTemplate x
+// active ShiftAssignments for that date; not manually created.
+export interface ShiftTaskAssignment {
+  id: string;
+  home_id: string;
+  shift_id: string;
+  date: string;
+  task_definition_id: string;
+  task_name: string;
+  category: TaskCategory;
+  resident_id: string | null;
+  status: ShiftTaskStatus;
+  claimed_by: string | null;
+  claimed_by_name: string | null;
+  completed_by: string | null;
+  completed_by_name: string | null;
+  completed_at: string | null;
+  notes: string | null;
+}
+
+// ==========================================
+// EXCEPTIONS
+//
+// Detected automatically from the connected data (missed tasks, missed
+// medications, overdue reassessments, expiring credentials, understaffed
+// shifts) rather than manually reported — that's what distinguishes an
+// "exception" from an IncidentReport, which a staff member files by hand.
+// ==========================================
+
+export type ExceptionType =
+  | 'missed_task'
+  | 'missed_medication'
+  | 'overdue_reassessment'
+  | 'expiring_credential'
+  | 'understaffed_shift';
+
+export type ExceptionSeverity = 'low' | 'medium' | 'high';
+export type ExceptionStatus = 'open' | 'acknowledged' | 'resolved';
+
+export interface ExceptionRecord {
+  id: string;
+  home_id: string;
+  type: ExceptionType;
+  severity: ExceptionSeverity;
+  resident_id: string | null;
+  resident_name: string | null;
+  staff_id: string | null;
+  staff_name: string | null;
+  description: string;
+  detected_at: string;
+  status: ExceptionStatus;
+  reviewed_by: string | null;
+  reviewed_by_name: string | null;
+  reviewed_at: string | null;
+  corrective_action: string | null;
 }

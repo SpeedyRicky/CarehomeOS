@@ -16,7 +16,15 @@ import {
   IncidentReport,
   AuditEvent,
   NotificationItem,
+  TaskDefinition,
+  ShiftTaskTemplate,
 } from './types';
+
+// Seed shift-assignment dates are computed relative to "today" (rather than
+// a fixed string) so the demo's shared shift-task board always has a
+// current shift to generate tasks against, regardless of what day this is
+// actually run on.
+const TODAY = new Date().toISOString().split('T')[0];
 
 export const INITIAL_ORGANIZATION: Organization = {
   id: 'org-hihaven',
@@ -150,6 +158,7 @@ export const INITIAL_SHIFTS: Shift[] = [
     shift_type: 'Day Shift (07:00 - 19:00)',
     starts_at: '07:00',
     ends_at: '19:00',
+    required_staff_count: 2,
   },
   {
     id: 'shift-night-today',
@@ -157,6 +166,7 @@ export const INITIAL_SHIFTS: Shift[] = [
     shift_type: 'Night Shift (19:00 - 07:00)',
     starts_at: '19:00',
     ends_at: '07:00',
+    required_staff_count: 1,
   },
   {
     id: 'shift-mgr-office',
@@ -164,6 +174,7 @@ export const INITIAL_SHIFTS: Shift[] = [
     shift_type: 'Manager Schedule (Mon-Fri 09:00 - 15:00)',
     starts_at: '09:00',
     ends_at: '15:00',
+    required_staff_count: 1,
   },
 ];
 
@@ -172,8 +183,8 @@ export const INITIAL_SHIFT_ASSIGNMENTS: ShiftAssignment[] = [
     id: 'assign-sarah-day',
     staff_id: 'staff-sarah',
     shift_id: 'shift-day-today',
-    date: '2026-09-07',
-    clocked_in_at: '2026-09-07T06:55:00Z',
+    date: TODAY,
+    clocked_in_at: `${TODAY}T06:55:00Z`,
     clocked_out_at: null,
     is_active: true,
   },
@@ -181,8 +192,8 @@ export const INITIAL_SHIFT_ASSIGNMENTS: ShiftAssignment[] = [
     id: 'assign-mary-day',
     staff_id: 'staff-mary',
     shift_id: 'shift-day-today',
-    date: '2026-09-07',
-    clocked_in_at: '2026-09-07T07:02:00Z',
+    date: TODAY,
+    clocked_in_at: `${TODAY}T07:02:00Z`,
     clocked_out_at: null,
     is_active: true,
   },
@@ -190,11 +201,40 @@ export const INITIAL_SHIFT_ASSIGNMENTS: ShiftAssignment[] = [
     id: 'assign-olatundun-mgr',
     staff_id: 'staff-olatundun',
     shift_id: 'shift-mgr-office',
-    date: '2026-09-07',
-    clocked_in_at: '2026-09-07T08:58:00Z',
+    date: TODAY,
+    clocked_in_at: `${TODAY}T08:58:00Z`,
     clocked_out_at: null,
     is_active: true,
   },
+];
+
+// ==========================================
+// SHARED SHIFT TASKS — task catalog + which tasks occur on which shift type.
+// Owner-adjustable via the Owner Dashboard's Shift Task Setup panel.
+// ==========================================
+
+export const INITIAL_TASK_DEFINITIONS: TaskDefinition[] = [
+  { id: 'task-shower', home_id: 'home-nl-01', name: 'Assist with Shower / Personal Hygiene', category: 'resident_care', applies_to: 'resident', frequency: 'once', is_active: true },
+  { id: 'task-med-pass', home_id: 'home-nl-01', name: 'Medication Pass', category: 'medication', applies_to: 'resident', frequency: 'once', is_active: true },
+  { id: 'task-breakfast', home_id: 'home-nl-01', name: 'Prepare & Serve Breakfast', category: 'meal', applies_to: 'home', frequency: 'once', is_active: true },
+  { id: 'task-lunch', home_id: 'home-nl-01', name: 'Prepare & Serve Lunch', category: 'meal', applies_to: 'home', frequency: 'once', is_active: true },
+  { id: 'task-dinner', home_id: 'home-nl-01', name: 'Prepare & Serve Dinner', category: 'meal', applies_to: 'home', frequency: 'once', is_active: true },
+  { id: 'task-housekeeping', home_id: 'home-nl-01', name: 'General Housekeeping', category: 'cleaning', applies_to: 'home', frequency: 'once', is_active: true },
+  { id: 'task-night-med-pass', home_id: 'home-nl-01', name: 'Night Medication Pass', category: 'medication', applies_to: 'resident', frequency: 'once', is_active: true },
+  { id: 'task-night-cleaning', home_id: 'home-nl-01', name: 'General Cleaning', category: 'cleaning', applies_to: 'home', frequency: 'once', is_active: true },
+  { id: 'task-hourly-walkthrough', home_id: 'home-nl-01', name: 'Hourly Safety Walkthrough', category: 'safety_check', applies_to: 'home', frequency: 'hourly', is_active: true },
+];
+
+export const INITIAL_SHIFT_TASK_TEMPLATES: ShiftTaskTemplate[] = [
+  { id: 'stt-day-shower', home_id: 'home-nl-01', shift_type: 'Day Shift (07:00 - 19:00)', task_definition_id: 'task-shower', is_active: true },
+  { id: 'stt-day-meds', home_id: 'home-nl-01', shift_type: 'Day Shift (07:00 - 19:00)', task_definition_id: 'task-med-pass', is_active: true },
+  { id: 'stt-day-breakfast', home_id: 'home-nl-01', shift_type: 'Day Shift (07:00 - 19:00)', task_definition_id: 'task-breakfast', is_active: true },
+  { id: 'stt-day-lunch', home_id: 'home-nl-01', shift_type: 'Day Shift (07:00 - 19:00)', task_definition_id: 'task-lunch', is_active: true },
+  { id: 'stt-day-dinner', home_id: 'home-nl-01', shift_type: 'Day Shift (07:00 - 19:00)', task_definition_id: 'task-dinner', is_active: true },
+  { id: 'stt-day-housekeeping', home_id: 'home-nl-01', shift_type: 'Day Shift (07:00 - 19:00)', task_definition_id: 'task-housekeeping', is_active: true },
+  { id: 'stt-night-meds', home_id: 'home-nl-01', shift_type: 'Night Shift (19:00 - 07:00)', task_definition_id: 'task-night-med-pass', is_active: true },
+  { id: 'stt-night-cleaning', home_id: 'home-nl-01', shift_type: 'Night Shift (19:00 - 07:00)', task_definition_id: 'task-night-cleaning', is_active: true },
+  { id: 'stt-night-walkthrough', home_id: 'home-nl-01', shift_type: 'Night Shift (19:00 - 07:00)', task_definition_id: 'task-hourly-walkthrough', is_active: true },
 ];
 
 export const INITIAL_PROSPECTS: Prospect[] = [

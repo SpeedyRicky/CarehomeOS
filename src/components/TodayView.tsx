@@ -15,6 +15,9 @@ import {
   Utensils,
   ChevronRight,
   AlertTriangle,
+  ListChecks,
+  Hand,
+  SkipForward,
 } from 'lucide-react';
 import {
   Resident,
@@ -24,6 +27,7 @@ import {
   ShiftChecklist,
   Staff,
   ShiftAssignment,
+  ShiftTaskAssignment,
 } from '../types';
 
 interface TodayViewProps {
@@ -34,11 +38,15 @@ interface TodayViewProps {
   medAdmins: MedicationAdministration[];
   dailyReports: DailyReport[];
   shiftChecklists: ShiftChecklist[];
+  shiftTasks: ShiftTaskAssignment[];
   onOpenMedPass: (order: MedicationOrder, resident: Resident) => void;
   onOpenDailyReport: (resident: Resident, existingReport?: DailyReport) => void;
   onOpenNewIncident: (residentId?: string) => void;
   onOpenShiftChecklist: () => void;
   onNavigateToAI: () => void;
+  onClaimTask: (taskId: string) => void;
+  onCompleteTask: (taskId: string) => void;
+  onSkipTask: (taskId: string, reason: string) => void;
 }
 
 export const TodayView: React.FC<TodayViewProps> = ({
@@ -49,12 +57,18 @@ export const TodayView: React.FC<TodayViewProps> = ({
   medAdmins,
   dailyReports,
   shiftChecklists,
+  shiftTasks,
   onOpenMedPass,
   onOpenDailyReport,
   onOpenNewIncident,
   onOpenShiftChecklist,
   onNavigateToAI,
+  onClaimTask,
+  onCompleteTask,
+  onSkipTask,
 }) => {
+  const [skippingTaskId, setSkippingTaskId] = useState<string | null>(null);
+  const [skipReason, setSkipReason] = useState('');
   const [filterType, setFilterType] = useState<'all' | 'meds' | 'reports' | 'checklist'>('all');
 
   const isShiftActive = activeAssignment?.is_active ?? false;
@@ -217,6 +231,117 @@ export const TodayView: React.FC<TodayViewProps> = ({
               style={{ width: `${completionPercentage}%` }}
             />
           </div>
+        </div>
+      </div>
+
+      {/* Shared Shift Duties — the actual task board for whoever's on shift.
+          Tasks aren't pre-assigned to one person; 2-3 day staff split them
+          up (one does showers, another does meds or breakfast) and claim
+          whichever they're picking up. */}
+      <div className="bg-white rounded-xl border border-slate-200 shadow-xs">
+        <div className="p-4 border-b border-slate-100 flex items-center justify-between">
+          <h2 className="text-sm font-bold text-slate-900 flex items-center gap-1.5">
+            <ListChecks className="w-4 h-4 text-emerald-600" />
+            Shared Shift Duties
+          </h2>
+          <span className="text-[11px] text-slate-400">
+            {shiftTasks.filter((t) => t.status === 'completed' || t.status === 'skipped').length}/{shiftTasks.length} done
+          </span>
+        </div>
+        <div className="divide-y divide-slate-100 max-h-96 overflow-y-auto">
+          {shiftTasks.length === 0 ? (
+            <p className="p-6 text-xs text-slate-400 text-center">No shift tasks generated yet — clock in to start today's shift.</p>
+          ) : (
+            shiftTasks.map((task) => {
+              const resident = task.resident_id ? residents.find((r) => r.id === task.resident_id) : undefined;
+              const isDone = task.status === 'completed' || task.status === 'skipped';
+
+              return (
+                <div key={task.id} className={`p-3.5 text-xs flex items-center justify-between gap-3 ${isDone ? 'opacity-60' : ''}`}>
+                  <div className="flex items-start gap-3">
+                    <div
+                      className={`w-7 h-7 rounded-lg flex items-center justify-center shrink-0 mt-0.5 ${
+                        task.status === 'completed'
+                          ? 'bg-emerald-100 text-emerald-700'
+                          : task.status === 'skipped'
+                          ? 'bg-slate-100 text-slate-500'
+                          : task.status === 'claimed'
+                          ? 'bg-blue-100 text-blue-700'
+                          : 'bg-amber-100 text-amber-700'
+                      }`}
+                    >
+                      {isDone ? <CheckCircle2 className="w-4 h-4" /> : <Clock className="w-4 h-4" />}
+                    </div>
+                    <div>
+                      <div className="font-semibold text-slate-900">
+                        {task.task_name}
+                        {resident && <span className="text-slate-500 font-normal"> · {resident.full_name}</span>}
+                      </div>
+                      {task.status === 'claimed' && (
+                        <div className="text-[11px] text-blue-600 mt-0.5">Claimed by {task.claimed_by_name}</div>
+                      )}
+                      {task.status === 'completed' && (
+                        <div className="text-[11px] text-emerald-600 mt-0.5">Done by {task.completed_by_name}</div>
+                      )}
+                      {task.status === 'skipped' && (
+                        <div className="text-[11px] text-slate-500 mt-0.5">Skipped by {task.completed_by_name}: {task.notes}</div>
+                      )}
+                    </div>
+                  </div>
+
+                  {!isDone && (
+                    <div className="shrink-0 flex items-center gap-1.5">
+                      {task.status === 'pending' && (
+                        <button
+                          onClick={() => onClaimTask(task.id)}
+                          className="p-1.5 rounded-lg text-slate-500 hover:bg-slate-100 hover:text-slate-700 transition"
+                          title="Claim"
+                        >
+                          <Hand className="w-3.5 h-3.5" />
+                        </button>
+                      )}
+                      <button
+                        onClick={() => onCompleteTask(task.id)}
+                        className="px-2.5 py-1 rounded-lg bg-emerald-50 text-emerald-700 font-semibold hover:bg-emerald-100 transition"
+                      >
+                        Done
+                      </button>
+                      <button
+                        onClick={() => setSkippingTaskId(skippingTaskId === task.id ? null : task.id)}
+                        className="p-1.5 rounded-lg text-slate-400 hover:bg-slate-100 hover:text-slate-600 transition"
+                        title="Skip"
+                      >
+                        <SkipForward className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  )}
+
+                  {skippingTaskId === task.id && (
+                    <div className="w-full flex items-center gap-2 mt-2">
+                      <input
+                        autoFocus
+                        value={skipReason}
+                        onChange={(e) => setSkipReason(e.target.value)}
+                        placeholder="Reason for skipping..."
+                        className="flex-1 text-xs border border-slate-200 rounded-lg px-2 py-1 focus:outline-none focus:ring-1 focus:ring-emerald-500"
+                      />
+                      <button
+                        onClick={() => {
+                          if (!skipReason.trim()) return;
+                          onSkipTask(task.id, skipReason.trim());
+                          setSkippingTaskId(null);
+                          setSkipReason('');
+                        }}
+                        className="px-2.5 py-1 rounded-lg bg-rose-600 text-white text-[11px] font-semibold hover:bg-rose-700 transition"
+                      >
+                        Confirm Skip
+                      </button>
+                    </div>
+                  )}
+                </div>
+              );
+            })
+          )}
         </div>
       </div>
 

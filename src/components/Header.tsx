@@ -44,6 +44,9 @@ export const Header: React.FC<HeaderProps> = ({
 
   const navItems = [
     { id: 'today', label: 'Today Queue', badge: 'Active' },
+    // Owner Dashboard is Owner-only; Manager Dashboard is Manager+Owner.
+    ...(isOwner ? [{ id: 'owner-dashboard', label: 'Owner Dashboard' }] : []),
+    ...(!isCareWorker ? [{ id: 'manager-dashboard', label: 'Manager Dashboard' }] : []),
     { id: 'emar', label: 'eMAR Meds' },
     { id: 'incidents', label: 'Incidents & Review', countBadge: '2' },
     { id: 'residents', label: 'Residents & Care' },
