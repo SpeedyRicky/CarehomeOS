@@ -3,7 +3,6 @@ import {
   Building2,
   Clock,
   Bell,
-  CheckCircle2,
   LogOut,
   LogIn,
   ChevronDown,
@@ -12,8 +11,6 @@ import { Staff, ShiftAssignment, NotificationItem } from '../types';
 
 interface HeaderProps {
   currentStaff: Staff;
-  allStaff: Staff[];
-  onSelectStaff: (staff: Staff) => void;
   onLogout: () => void;
   activeAssignment: ShiftAssignment | undefined;
   onClockToggle: () => void;
@@ -25,8 +22,6 @@ interface HeaderProps {
 
 export const Header: React.FC<HeaderProps> = ({
   currentStaff,
-  allStaff,
-  onSelectStaff,
   onLogout,
   activeAssignment,
   onClockToggle,
@@ -35,7 +30,7 @@ export const Header: React.FC<HeaderProps> = ({
   activeTab,
   setActiveTab,
 }) => {
-  const [showStaffMenu, setShowStaffMenu] = useState(false);
+  const [showAccountMenu, setShowAccountMenu] = useState(false);
   const [showNotifMenu, setShowNotifMenu] = useState(false);
 
   const unreadNotifs = notifications.filter((n) => !n.read);
@@ -172,11 +167,12 @@ export const Header: React.FC<HeaderProps> = ({
               )}
             </div>
 
-            {/* Staff Role Switcher (Crucial for demonstrating Shift-Scoped RBAC & Segregation of Duties) */}
+            {/* Signed-in account — real auth now, so this is identity display
+                + sign out, not a free staff switcher. */}
             <div className="relative">
               <button
-                id="staff-switcher-btn"
-                onClick={() => setShowStaffMenu(!showStaffMenu)}
+                id="account-menu-btn"
+                onClick={() => setShowAccountMenu(!showAccountMenu)}
                 className="flex items-center gap-2.5 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-left transition"
               >
                 <div className="w-7 h-7 rounded-full bg-slate-700 flex items-center justify-center font-bold text-xs text-emerald-400">
@@ -193,45 +189,20 @@ export const Header: React.FC<HeaderProps> = ({
                 <ChevronDown className="w-3.5 h-3.5 text-slate-400 ml-1" />
               </button>
 
-              {showStaffMenu && (
-                <div className="absolute right-0 mt-2 w-72 bg-slate-800 border border-slate-700 rounded-xl shadow-2xl z-50 p-2">
-                  <div className="px-2 py-1 text-[11px] font-semibold uppercase text-slate-400 tracking-wider">
-                    Switch Active User (RBAC & Scope)
+              {showAccountMenu && (
+                <div className="absolute right-0 mt-2 w-64 bg-slate-800 border border-slate-700 rounded-xl shadow-2xl z-50 p-2">
+                  <div className="px-2.5 py-2 border-b border-slate-700 mb-1">
+                    <div className="text-xs font-semibold text-slate-100">{currentStaff.name}</div>
+                    <div className="text-[10px] text-slate-400">@{currentStaff.username}</div>
+                    <div className="text-[10px] text-emerald-400 font-medium mt-0.5">
+                      {currentStaff.role} · {currentStaff.schedule_type === 'fixed_office' ? 'Mon-Fri (09:00-15:00)' : 'Rotating Shift'}
+                    </div>
                   </div>
-                  <p className="px-2 pb-2 text-[11px] text-slate-400">
-                    Switch between roles to verify shift-scoped access and segregation-of-duties.
-                  </p>
-                  <div className="space-y-1">
-                    {allStaff.map((staff) => (
-                      <button
-                        key={staff.id}
-                        onClick={() => {
-                          onSelectStaff(staff);
-                          setShowStaffMenu(false);
-                        }}
-                        className={`w-full text-left px-2.5 py-2 rounded-lg text-xs flex items-center justify-between transition ${
-                          currentStaff.id === staff.id
-                            ? 'bg-emerald-600 text-white font-medium'
-                            : 'hover:bg-slate-700 text-slate-200'
-                        }`}
-                      >
-                        <div>
-                          <div className="font-semibold">{staff.name}</div>
-                          <div className={`text-[10px] ${currentStaff.id === staff.id ? 'text-emerald-100' : 'text-slate-400'}`}>
-                            {staff.role} · {staff.schedule_type === 'fixed_office' ? 'Mon-Fri (09:00-15:00)' : 'Rotating Shift'}
-                          </div>
-                        </div>
-                        {currentStaff.id === staff.id && (
-                          <CheckCircle2 className="w-4 h-4 text-white" />
-                        )}
-                      </button>
-                    ))}
-                  </div>
-                  <div className="mt-1 pt-1 border-t border-slate-700">
+                  <div className="mt-1 pt-1">
                     <button
                       id="logout-btn"
                       onClick={() => {
-                        setShowStaffMenu(false);
+                        setShowAccountMenu(false);
                         onLogout();
                       }}
                       className="w-full flex items-center gap-2 px-2.5 py-2 rounded-lg text-xs font-semibold text-rose-300 hover:bg-rose-500/10 transition"

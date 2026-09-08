@@ -13,13 +13,11 @@
 // this file's createApiApp() for local dev and traditional Node hosts
 // (Cloud Run, a VM, etc.).
 //
-// There is no authentication layer here — every route is open, matching
-// the original prototype. Identity in this demo is established entirely
-// client-side by LoginView.tsx's hardcoded credential check; the server
-// trusts whatever staff id the client sends, same as before any of that
-// existed. Do not add real access control on top of this without also
-// adding real server-side session verification — a client-side login
-// screen alone proves nothing to this server.
+// Authentication is two layers, both enforced here server-side (see
+// SECURITY.md): username + password gets a short-lived pending_2fa token,
+// then a one-time code to phone or email exchanges that for a real session
+// token. Every route below except /api/health and /api/auth/* requires a
+// valid session — see requireAuth().
 import express from 'express';
 import {
   INITIAL_ORGANIZATION,
@@ -42,6 +40,7 @@ import {
   INITIAL_TASK_DEFINITIONS,
   INITIAL_SHIFT_TASK_TEMPLATES,
 } from './seedData';
+import { SEED_PASSWORDS, SEED_OTP_CODES } from './seedData.auth';
 import {
   AuditEvent,
   IncidentReport,
@@ -51,12 +50,15 @@ import {
   Reassessment,
   Resident,
   Prospect,
+  Staff,
   TaskDefinition,
   ShiftTaskTemplate,
   ShiftTaskAssignment,
 } from './types';
 import { ensureShiftTasksGenerated } from './shiftTasks';
 import { computeExceptions } from './exceptions';
+import { createToken, verifyToken } from './lib/auth';
+import { sendSms, sendEmail, maskPhone, maskEmail } from './services/notificationDeliveryService';
 
 // Persisted review state for a computed exception, keyed by the exception's
 // deterministic id (see src/exceptions.ts). Exceptions themselves are never
@@ -127,6 +129,108 @@ export function recordEvent(
   return event;
 }
 
+// ==========================================
+// AUTHENTICATION
+// Two layers: username + password (layer one), then a one-time code to
+// phone or email (layer two / the actual 2FA). See SECURITY.md.
+//
+// DEMO-ONLY: every credential and OTP code is a fixed hardcoded literal
+// from src/seedData.auth.ts — no password hashing, no generated OTP codes,
+// no in-memory Map tracking pending state between requests. That's
+// deliberate: Vercel serverless functions don't guarantee that the
+// separate requests making up a login flow (login, then otp/send, then
+// otp/verify) land on the same warm instance, so a Map-based "pending OTP"
+// or "pending reset token" can vanish between steps on a cold start. Fixed
+// literals sidestep that entirely. See SECURITY.md for what a real
+// deployment needs instead.
+// ==========================================
+
+const SESSION_SECRET = process.env.SESSION_SECRET || 'INSECURE-DEV-ONLY-SESSION-SECRET-CHANGE-ME';
+if (!process.env.SESSION_SECRET) {
+  console.warn('[SECURITY] SESSION_SECRET is not set. Using an insecure development default — set SESSION_SECRET before deploying.');
+}
+
+const PENDING_2FA_TTL_SECONDS = 5 * 60;
+const SESSION_TTL_SECONDS = 12 * 60 * 60;
+
+function findStaffByUsername(username: string): Staff | undefined {
+  const needle = username.trim().toLowerCase();
+  return dbState.staff.find((s) => s.username.toLowerCase() === needle);
+}
+
+function findStaffByEmail(email: string): Staff | undefined {
+  const needle = email.trim().toLowerCase();
+  return dbState.staff.find((s) => s.email.toLowerCase() === needle);
+}
+
+export interface AuthedRequest extends express.Request {
+  staff?: Staff;
+}
+
+function getBearerToken(req: express.Request): string | undefined {
+  const header = req.headers.authorization;
+  if (!header?.startsWith('Bearer ')) return undefined;
+  return header.slice('Bearer '.length);
+}
+
+/** Guards every route that needs a real signed-in staff member. */
+export function requireAuth(req: AuthedRequest, res: express.Response, next: express.NextFunction) {
+  const token = getBearerToken(req);
+  const payload = verifyToken(token, SESSION_SECRET);
+  if (!payload || payload.purpose !== 'session') {
+    return res.status(401).json({ error: 'Authentication required. Please sign in.' });
+  }
+  const staffMember = dbState.staff.find((s) => s.id === payload.staffId);
+  if (!staffMember) {
+    return res.status(401).json({ error: 'Session is no longer valid. Please sign in again.' });
+  }
+  req.staff = staffMember;
+  next();
+}
+
+/** Guards the OTP send/verify endpoints — accepts only a pending_2fa token
+ * (issued by /api/auth/login after password verifies), never a full
+ * session token, so a signed-in session can't be used to re-trigger OTPs
+ * for a different account and a pending 2FA ticket can't be used as a
+ * session elsewhere. */
+function requirePendingAuth(req: AuthedRequest & { pendingStaffId?: string }, res: express.Response, next: express.NextFunction) {
+  const token = getBearerToken(req);
+  const payload = verifyToken(token, SESSION_SECRET);
+  if (!payload || payload.purpose !== 'pending_2fa') {
+    return res.status(401).json({ error: 'Verification session expired. Please sign in again.' });
+  }
+  const staffMember = dbState.staff.find((s) => s.id === payload.staffId);
+  if (!staffMember) {
+    return res.status(401).json({ error: 'Verification session is no longer valid. Please sign in again.' });
+  }
+  (req as any).pendingStaffId = staffMember.id;
+  (req as any).pendingStaff = staffMember;
+  next();
+}
+
+function requireRole(...roles: Array<Staff['role']>) {
+  return (req: AuthedRequest, res: express.Response, next: express.NextFunction) => {
+    if (!req.staff || !roles.includes(req.staff.role)) {
+      return res.status(403).json({ error: `This action requires one of the following roles: ${roles.join(', ')}.` });
+    }
+    next();
+  };
+}
+
+/**
+ * Rejects requests where the body claims to act as a different staff
+ * member than the authenticated session — closes identity spoofing where a
+ * mutating endpoint would otherwise trust a client-supplied staff id at
+ * face value.
+ */
+function requireSelf(req: AuthedRequest, res: express.Response, claimedStaffId: string | undefined): boolean {
+  if (claimedStaffId && req.staff && claimedStaffId !== req.staff.id) {
+    res.status(403).json({ error: 'You may not perform this action on behalf of another staff member.' });
+    return false;
+  }
+  return true;
+}
+
 /**
  * Builds the Express app containing every non-AI `/api/*` route. See the
  * file header above for why this lives in its own module: api/index.ts
@@ -149,14 +253,147 @@ export function createApiApp(): express.Express {
     });
   });
 
-  // API: Get Full State (Scoped to current home_id)
-  app.get('/api/state', (req, res) => {
+  // ==========================================
+  // AUTHENTICATION
+  // ==========================================
+
+  // API: Layer one — username + password. On success, issues a short-lived
+  // pending_2fa token (not a session) so the client can proceed to the OTP
+  // step without a session existing yet.
+  app.post('/api/auth/login', (req, res) => {
+    const { username, password } = req.body as { username?: string; password?: string };
+    if (!username || !password) {
+      return res.status(400).json({ error: 'Username and password are required.' });
+    }
+
+    const staffMember = findStaffByUsername(username);
+    const expectedPassword = staffMember ? SEED_PASSWORDS[staffMember.id] : undefined;
+
+    // Constant-shape response whether the username doesn't exist or the
+    // password is wrong — never reveal which one failed.
+    if (!staffMember || !expectedPassword || password !== expectedPassword) {
+      recordEvent('anonymous', username, 'LOGIN_FAILED', 'staff', staffMember?.id || 'unknown', { reason: 'invalid_credentials' });
+      return res.status(401).json({ error: 'Invalid username or password.' });
+    }
+
+    const pendingToken = createToken(
+      { purpose: 'pending_2fa', staffId: staffMember.id, role: staffMember.role, homeId: staffMember.home_id },
+      SESSION_SECRET,
+      PENDING_2FA_TTL_SECONDS
+    );
+
+    recordEvent(staffMember.id, staffMember.name, 'LOGIN_PASSWORD_VERIFIED', 'staff', staffMember.id, {});
+    res.json({
+      success: true,
+      pendingToken,
+      staff: { name: staffMember.name, role: staffMember.role },
+      contact: { maskedPhone: maskPhone(staffMember.phone), maskedEmail: maskEmail(staffMember.email) },
+    });
+  });
+
+  // API: Layer two, step 1 — send a one-time code to the chosen contact
+  // method. Requires the pending_2fa token from /api/auth/login.
+  app.post('/api/auth/otp/send', requirePendingAuth, async (req: any, res) => {
+    const { channel } = req.body as { channel?: 'sms' | 'email' };
+    if (channel !== 'sms' && channel !== 'email') {
+      return res.status(400).json({ error: 'channel must be "sms" or "email".' });
+    }
+    const staffMember: Staff = req.pendingStaff;
+    const destination = channel === 'sms' ? staffMember.phone : staffMember.email;
+    const code = SEED_OTP_CODES[staffMember.id];
+
+    const message = `Your CareHomeOS verification code is ${code}. This is a fixed demo code.`;
+    const result = channel === 'sms' ? await sendSms(destination, message) : await sendEmail(destination, 'Your CareHomeOS verification code', message);
+
+    if (!result.success) {
+      return res.status(502).json({ error: `Could not send the code by ${channel === 'sms' ? 'text' : 'email'}. Try the other option.` });
+    }
+
+    res.json({
+      success: true,
+      maskedDestination: channel === 'sms' ? maskPhone(destination) : maskEmail(destination),
+      // Only ever present when no real provider is configured — see
+      // notificationDeliveryService.ts. A configured deployment never
+      // returns the code in the response body.
+      devCode: result.devMode ? code : undefined,
+    });
+  });
+
+  // API: Layer two, step 2 — verify the code and issue a real session.
+  app.post('/api/auth/otp/verify', requirePendingAuth, (req: any, res) => {
+    const { code } = req.body as { code?: string };
+    const staffMember: Staff = req.pendingStaff;
+    const expectedCode = SEED_OTP_CODES[staffMember.id];
+
+    if (!expectedCode || code !== expectedCode) {
+      return res.status(401).json({ error: 'Incorrect code.' });
+    }
+
+    const token = createToken(
+      { purpose: 'session', staffId: staffMember.id, role: staffMember.role, homeId: staffMember.home_id },
+      SESSION_SECRET,
+      SESSION_TTL_SECONDS
+    );
+
+    recordEvent(staffMember.id, staffMember.name, 'LOGIN_SUCCESS', 'staff', staffMember.id, {});
+    res.json({ success: true, token, staff: staffMember });
+  });
+
+  // API: Resolve the current session
+  app.get('/api/auth/me', requireAuth, (req: AuthedRequest, res) => {
+    res.json({ staff: req.staff });
+  });
+
+  // API: Logout (primarily client-side token discard; recorded for audit)
+  app.post('/api/auth/logout', requireAuth, (req: AuthedRequest, res) => {
+    recordEvent(req.staff!.id, req.staff!.name, 'LOGOUT', 'staff', req.staff!.id, {});
+    res.json({ success: true });
+  });
+
+  // API: Forgot username — always returns a generic success regardless of
+  // whether the email matches an account, so this endpoint can't be used
+  // to enumerate valid staff emails.
+  app.post('/api/auth/forgot-username', async (req, res) => {
+    const { email } = req.body as { email?: string };
+    if (email) {
+      const staffMember = findStaffByEmail(email);
+      if (staffMember) {
+        await sendEmail(
+          staffMember.email,
+          'Your CareHomeOS username',
+          `Your username is ${staffMember.username}. If you didn't request this, you can ignore this email.`
+        );
+        recordEvent(staffMember.id, staffMember.name, 'USERNAME_RECOVERY_SENT', 'staff', staffMember.id, {});
+      }
+    }
+    res.json({ success: true, message: "If that email matches an account, we've sent a username reminder." });
+  });
+
+  // API: Forgot password — same non-revealing shape as forgot-username.
+  // DEMO-ONLY: this build has no self-serve password reset (every password
+  // is a fixed literal in src/seedData.auth.ts) — this endpoint just tells
+  // the requester to contact an administrator, without revealing whether
+  // the email matches an account.
+  app.post('/api/auth/forgot-password', async (req, res) => {
+    const { email } = req.body as { email?: string };
+    if (email) {
+      const staffMember = findStaffByEmail(email);
+      if (staffMember) {
+        recordEvent(staffMember.id, staffMember.name, 'PASSWORD_RESET_REQUESTED', 'staff', staffMember.id, {});
+      }
+    }
+    res.json({ success: true, message: "If that email matches an account, an administrator will be in touch with password reset instructions." });
+  });
+
+  // API: Get Full State (Scoped to current home_id; requires an authenticated session)
+  app.get('/api/state', requireAuth, (req, res) => {
     res.json(dbState);
   });
 
   // API: Clock In / Clock Out
-  app.post('/api/shifts/clock', (req, res) => {
+  app.post('/api/shifts/clock', requireAuth, (req: AuthedRequest, res) => {
     const { staffId, shiftId, action } = req.body;
+    if (!requireSelf(req, res, staffId)) return;
     const staffMember = dbState.staff.find((s) => s.id === staffId);
     if (!staffMember) {
       return res.status(404).json({ error: 'Staff member not found' });
@@ -197,13 +434,10 @@ export function createApiApp(): express.Express {
   });
 
   // API: Convert Prospect to Resident (Lifecycle Spine)
-  app.post('/api/prospects/convert', (req, res) => {
-    const { prospectId, roomNumber, levelOfCare, actorId, actorName } = req.body;
-
-    const actor = dbState.staff.find((s) => s.id === actorId);
-    if (actor && actor.role === 'Care Worker') {
-      return res.status(403).json({ error: 'Access restricted: Care workers are not permitted to manage CRM prospects or resident admissions.' });
-    }
+  app.post('/api/prospects/convert', requireAuth, requireRole('Manager', 'Owner'), (req: AuthedRequest, res) => {
+    const { prospectId, roomNumber, levelOfCare, actorId } = req.body;
+    if (!requireSelf(req, res, actorId)) return;
+    const actorName = req.staff!.name;
 
     const prospect = dbState.prospects.find((p) => p.id === prospectId);
     if (!prospect) {
@@ -251,7 +485,7 @@ export function createApiApp(): express.Express {
     };
     dbState.reassessments.unshift(newReassessment);
 
-    recordEvent(actorId || 'staff-olatundun', actorName || 'Manager', 'PROSPECT_CONVERTED', 'residents', newResident.id, {
+    recordEvent(req.staff!.id, actorName, 'PROSPECT_CONVERTED', 'residents', newResident.id, {
       prospect_id: prospect.id,
       resident_name: newResident.full_name,
       room: newResident.room_number,
@@ -261,8 +495,9 @@ export function createApiApp(): express.Express {
   });
 
   // API: eMAR Administer Medication
-  app.post('/api/emar/administer', (req, res) => {
+  app.post('/api/emar/administer', requireAuth, (req: AuthedRequest, res) => {
     const { orderId, residentId, shiftId, administeredBy, administeredByName, doseGiven, status, notes, scheduledTime } = req.body;
+    if (!requireSelf(req, res, administeredBy)) return;
 
     const administration: MedicationAdministration = {
       id: `med-adm-${Date.now()}`,
@@ -293,8 +528,9 @@ export function createApiApp(): express.Express {
   });
 
   // API: Daily Report Submit / Update
-  app.post('/api/daily-reports', (req, res) => {
+  app.post('/api/daily-reports', requireAuth, (req: AuthedRequest, res) => {
     const reportData: DailyReport = req.body;
+    if (!requireSelf(req, res, reportData.authored_by)) return;
     const existingIndex = dbState.dailyReports.findIndex(
       (r) => r.resident_id === reportData.resident_id && r.date === reportData.date
     );
@@ -321,8 +557,9 @@ export function createApiApp(): express.Express {
   });
 
   // API: Shift Checklist (Medication Storage Secured - NL AG Finding)
-  app.post('/api/shift-checklists', (req, res) => {
+  app.post('/api/shift-checklists', requireAuth, (req: AuthedRequest, res) => {
     const checklist: ShiftChecklist = req.body;
+    if (!requireSelf(req, res, checklist.completed_by)) return;
     dbState.shiftChecklists.unshift(checklist);
 
     recordEvent(checklist.completed_by, checklist.completed_by_name, 'SHIFT_CHECKLIST_COMPLETED', 'shift_checklists', checklist.id, {
@@ -335,8 +572,9 @@ export function createApiApp(): express.Express {
   });
 
   // API: Incident Submit (Draft -> Submitted)
-  app.post('/api/incidents/submit', (req, res) => {
+  app.post('/api/incidents/submit', requireAuth, (req: AuthedRequest, res) => {
     const incidentData: IncidentReport = req.body;
+    if (!requireSelf(req, res, incidentData.reported_by)) return;
     const existingIndex = dbState.incidents.findIndex((i) => i.id === incidentData.id);
 
     if (existingIndex >= 0) {
@@ -371,17 +609,15 @@ export function createApiApp(): express.Express {
   });
 
   // API: Incident Review (Approve / Reject) with SEGREGATION OF DUTIES
-  app.post('/api/incidents/review', (req, res) => {
-    const { incidentId, reviewerId, reviewerName, reviewerRole, action, rejectionReason } = req.body;
+  app.post('/api/incidents/review', requireAuth, requireRole('Manager', 'Owner'), (req: AuthedRequest, res) => {
+    const { incidentId, action, rejectionReason } = req.body;
+    const reviewerId = req.staff!.id;
+    const reviewerName = req.staff!.name;
+    const reviewerRole = req.staff!.role;
 
     const incident = dbState.incidents.find((i) => i.id === incidentId);
     if (!incident) {
       return res.status(404).json({ error: 'Incident not found' });
-    }
-
-    // Role check: Only Owner or Manager
-    if (reviewerRole !== 'Manager' && reviewerRole !== 'Owner') {
-      return res.status(403).json({ error: 'Only Manager or Owner roles can review incident reports.' });
     }
 
     // Segregation of duties check: Reviewer CANNOT be the author!
@@ -423,13 +659,9 @@ export function createApiApp(): express.Express {
   });
 
   // API: Complete Reassessment (NL AG finding backlog clearance)
-  app.post('/api/reassessments/complete', (req, res) => {
+  app.post('/api/reassessments/complete', requireAuth, requireRole('Manager', 'Owner'), (req: AuthedRequest, res) => {
     const { reassessmentId, completedBy, outcomeNotes, newCarePlanCreated } = req.body;
-
-    const actor = dbState.staff.find((s) => s.id === completedBy);
-    if (actor && actor.role === 'Care Worker') {
-      return res.status(403).json({ error: 'Access restricted: Care workers are not permitted to conduct or complete statutory reassessments.' });
-    }
+    if (!requireSelf(req, res, completedBy)) return;
 
     const reassessment = dbState.reassessments.find((r) => r.id === reassessmentId);
     if (!reassessment) {
@@ -441,7 +673,7 @@ export function createApiApp(): express.Express {
     reassessment.completed_by = completedBy;
     reassessment.outcome_notes = outcomeNotes;
 
-    recordEvent(completedBy, 'Staff', 'REASSESSMENT_COMPLETED', 'reassessments', reassessment.id, {
+    recordEvent(req.staff!.id, req.staff!.name, 'REASSESSMENT_COMPLETED', 'reassessments', reassessment.id, {
       outcome_notes: outcomeNotes,
       resident_id: reassessment.resident_id,
       new_care_plan_created: !!newCarePlanCreated,
@@ -456,18 +688,15 @@ export function createApiApp(): express.Express {
 
   // API: Task catalog (owner-configurable list of task types that can occur
   // on a shift, e.g. "Assist with Shower", "Medication Pass").
-  app.get('/api/task-definitions', (req, res) => {
+  app.get('/api/task-definitions', requireAuth, (req, res) => {
     res.json({ taskDefinitions: dbState.taskDefinitions });
   });
 
   // API: Create or update a task definition. Owner-only — this is the
   // catalog every home's shift task setup draws from.
-  app.post('/api/task-definitions', (req, res) => {
-    const { actorId, taskDefinition } = req.body as { actorId: string; taskDefinition: TaskDefinition };
-    const actor = dbState.staff.find((s) => s.id === actorId);
-    if (!actor || actor.role !== 'Owner') {
-      return res.status(403).json({ error: 'Only the Owner may edit the task catalog.' });
-    }
+  app.post('/api/task-definitions', requireAuth, requireRole('Owner'), (req: AuthedRequest, res) => {
+    const { taskDefinition } = req.body as { taskDefinition: TaskDefinition };
+    const actor = req.staff!;
 
     const existingIndex = dbState.taskDefinitions.findIndex((t) => t.id === taskDefinition.id);
     if (existingIndex >= 0) {
@@ -488,16 +717,13 @@ export function createApiApp(): express.Express {
 
   // API: Which tasks occur on which shift type — this is the "owner should
   // be able to adjust tasks" control surface.
-  app.get('/api/shift-task-templates', (req, res) => {
+  app.get('/api/shift-task-templates', requireAuth, (req, res) => {
     res.json({ shiftTaskTemplates: dbState.shiftTaskTemplates });
   });
 
-  app.post('/api/shift-task-templates', (req, res) => {
-    const { actorId, shiftTaskTemplate } = req.body as { actorId: string; shiftTaskTemplate: ShiftTaskTemplate };
-    const actor = dbState.staff.find((s) => s.id === actorId);
-    if (!actor || actor.role !== 'Owner') {
-      return res.status(403).json({ error: 'Only the Owner may adjust which tasks occur on a shift.' });
-    }
+  app.post('/api/shift-task-templates', requireAuth, requireRole('Owner'), (req: AuthedRequest, res) => {
+    const { shiftTaskTemplate } = req.body as { shiftTaskTemplate: ShiftTaskTemplate };
+    const actor = req.staff!;
 
     const existingIndex = dbState.shiftTaskTemplates.findIndex((t) => t.id === shiftTaskTemplate.id);
     if (existingIndex >= 0) {
@@ -520,7 +746,7 @@ export function createApiApp(): express.Express {
   // API: The shared task board for a given date (defaults to today).
   // Generates today's task instances on first read of the day, from
   // whichever staff are actually scheduled — see src/shiftTasks.ts.
-  app.get('/api/shift-tasks', (req, res) => {
+  app.get('/api/shift-tasks', requireAuth, (req, res) => {
     const date = (req.query.date as string) || new Date().toISOString().split('T')[0];
     ensureShiftTasksGenerated(dbState, date);
     const tasks = dbState.shiftTaskAssignments.filter((t) => t.date === date);
@@ -529,34 +755,36 @@ export function createApiApp(): express.Express {
 
   // API: Claim an unclaimed task (self-organizing shift duties — whoever
   // picks it up owns it until completed or skipped).
-  app.post('/api/shift-tasks/:id/claim', (req, res) => {
-    const { staffId, staffName } = req.body as { staffId: string; staffName: string };
+  app.post('/api/shift-tasks/:id/claim', requireAuth, (req: AuthedRequest, res) => {
+    const { staffId } = req.body as { staffId: string };
+    if (!requireSelf(req, res, staffId)) return;
     const task = dbState.shiftTaskAssignments.find((t) => t.id === req.params.id);
     if (!task) return res.status(404).json({ error: 'Task not found.' });
     if (task.status !== 'pending') {
       return res.status(409).json({ error: `This task is already ${task.status}.` });
     }
     task.status = 'claimed';
-    task.claimed_by = staffId;
-    task.claimed_by_name = staffName;
+    task.claimed_by = req.staff!.id;
+    task.claimed_by_name = req.staff!.name;
     res.json({ success: true, task });
   });
 
   // API: Mark a task complete.
-  app.post('/api/shift-tasks/:id/complete', (req, res) => {
-    const { staffId, staffName, notes } = req.body as { staffId: string; staffName: string; notes?: string };
+  app.post('/api/shift-tasks/:id/complete', requireAuth, (req: AuthedRequest, res) => {
+    const { staffId, notes } = req.body as { staffId: string; notes?: string };
+    if (!requireSelf(req, res, staffId)) return;
     const task = dbState.shiftTaskAssignments.find((t) => t.id === req.params.id);
     if (!task) return res.status(404).json({ error: 'Task not found.' });
     if (task.status === 'completed' || task.status === 'skipped') {
       return res.status(409).json({ error: `This task is already ${task.status}.` });
     }
     task.status = 'completed';
-    task.completed_by = staffId;
-    task.completed_by_name = staffName;
+    task.completed_by = req.staff!.id;
+    task.completed_by_name = req.staff!.name;
     task.completed_at = new Date().toISOString();
     task.notes = notes || task.notes;
 
-    recordEvent(staffId, staffName, 'SHIFT_TASK_COMPLETED', 'shift_task_assignments', task.id, {
+    recordEvent(req.staff!.id, req.staff!.name, 'SHIFT_TASK_COMPLETED', 'shift_task_assignments', task.id, {
       task_name: task.task_name,
       resident_id: task.resident_id,
     });
@@ -566,8 +794,9 @@ export function createApiApp(): express.Express {
 
   // API: Skip a task with a required reason (feeds the exception if it
   // shouldn't have been skippable, but keeps the record honest either way).
-  app.post('/api/shift-tasks/:id/skip', (req, res) => {
-    const { staffId, staffName, reason } = req.body as { staffId: string; staffName: string; reason: string };
+  app.post('/api/shift-tasks/:id/skip', requireAuth, (req: AuthedRequest, res) => {
+    const { staffId, reason } = req.body as { staffId: string; reason: string };
+    if (!requireSelf(req, res, staffId)) return;
     if (!reason || !reason.trim()) {
       return res.status(400).json({ error: 'A reason is required to skip a task.' });
     }
@@ -577,12 +806,12 @@ export function createApiApp(): express.Express {
       return res.status(409).json({ error: `This task is already ${task.status}.` });
     }
     task.status = 'skipped';
-    task.completed_by = staffId;
-    task.completed_by_name = staffName;
+    task.completed_by = req.staff!.id;
+    task.completed_by_name = req.staff!.name;
     task.completed_at = new Date().toISOString();
     task.notes = reason.trim();
 
-    recordEvent(staffId, staffName, 'SHIFT_TASK_SKIPPED', 'shift_task_assignments', task.id, {
+    recordEvent(req.staff!.id, req.staff!.name, 'SHIFT_TASK_SKIPPED', 'shift_task_assignments', task.id, {
       task_name: task.task_name,
       resident_id: task.resident_id,
       reason: task.notes,
@@ -595,7 +824,7 @@ export function createApiApp(): express.Express {
   // EXCEPTIONS — detected automatically, not hand-filed. See src/exceptions.ts.
   // ==========================================
 
-  app.get('/api/exceptions', (req, res) => {
+  app.get('/api/exceptions', requireAuth, (req, res) => {
     const date = new Date().toISOString().split('T')[0];
     ensureShiftTasksGenerated(dbState, date);
     res.json({ exceptions: computeExceptions(dbState) });
@@ -603,16 +832,12 @@ export function createApiApp(): express.Express {
 
   // API: Acknowledge or resolve an exception, optionally logging a
   // corrective action. Manager/Owner only.
-  app.post('/api/exceptions/:id/review', (req, res) => {
-    const { actorId, status, correctiveAction } = req.body as {
-      actorId: string;
+  app.post('/api/exceptions/:id/review', requireAuth, requireRole('Manager', 'Owner'), (req: AuthedRequest, res) => {
+    const { status, correctiveAction } = req.body as {
       status: 'acknowledged' | 'resolved';
       correctiveAction?: string;
     };
-    const actor = dbState.staff.find((s) => s.id === actorId);
-    if (!actor || (actor.role !== 'Manager' && actor.role !== 'Owner')) {
-      return res.status(403).json({ error: 'Only a Manager or Owner may review an exception.' });
-    }
+    const actor = req.staff!;
     if (status !== 'acknowledged' && status !== 'resolved') {
       return res.status(400).json({ error: 'status must be "acknowledged" or "resolved".' });
     }

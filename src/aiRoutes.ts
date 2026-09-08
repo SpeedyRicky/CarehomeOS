@@ -39,6 +39,12 @@ export interface AiRouteContext {
     staff: any[];
     shiftAssignments: any[];
   };
+  // These endpoints summarize resident-level data (falls, meds, care
+  // notes) — same authentication requirement as the rest of the API. See
+  // requireAuth() in src/apiApp.ts; passed in here rather than imported
+  // directly so this file (and api/ai.ts, which bundles it) never has a
+  // reason to import anything beyond what's explicitly passed.
+  requireAuth: express.RequestHandler;
 }
 
 // Lazy Gemini AI Client initialization. `@google/genai` pulls in a sizeable
@@ -108,7 +114,7 @@ export function registerAiRoutes(app: express.Express, ctx: AiRouteContext): voi
   }
 
   // AI 1: Shift Handover Summary
-  app.post('/api/ai/shift-handover', async (req, res) => {
+  app.post('/api/ai/shift-handover', ctx.requireAuth, async (req, res) => {
     try {
       const { shiftType } = req.body;
 
@@ -213,7 +219,7 @@ ${
   });
 
   // AI 2: Compliance & Regulatory Audit Assistant
-  app.post('/api/ai/compliance-audit', async (req, res) => {
+  app.post('/api/ai/compliance-audit', ctx.requireAuth, async (req, res) => {
     try {
       const overdueReassessments = ctx.dbState.reassessments.filter((r) => r.status === 'overdue');
       const unapprovedIncidents = ctx.dbState.incidents.filter((i) => i.status === 'submitted');
@@ -288,7 +294,7 @@ Provide a structured compliance audit review:
   });
 
   // AI 3: Natural Language Q&A over Audit-Safe Views
-  app.post('/api/ai/ask-audit', async (req, res) => {
+  app.post('/api/ai/ask-audit', ctx.requireAuth, async (req, res) => {
     try {
       const { question } = req.body;
       if (!question) {
