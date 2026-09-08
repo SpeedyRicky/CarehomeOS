@@ -3,46 +3,57 @@ import { ShieldCheck, LogIn, ArrowLeft } from 'lucide-react';
 import { Staff } from '../types';
 
 interface LoginViewProps {
+  allStaff: Staff[];
   onLogin: (token: string, staff: Staff) => void;
 }
 
-type Step = 'login' | 'forgot-username' | 'forgot-password' | 'forgot-sent' | 'contact' | 'code';
+type Step = 'login' | 'contact' | 'code';
 
-async function api(path: string, body: any, token?: string) {
-  const res = await fetch(path, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
-    },
-    body: JSON.stringify(body),
-  });
-  const data = await res.json().catch(() => ({}));
-  return { ok: res.ok, data };
+// DEMO-ONLY hardcoded credentials — checked entirely client-side, with no
+// server round trip at all. An earlier version checked these server-side
+// and issued a signed session token, but that required the client to
+// complete a multi-request flow (login, then otp/send, then otp/verify)
+// that proved unreliable once deployed to Vercel. Since this is a demo
+// with no real security requirement, every value here is fixed and public
+// — see SECURITY.md. Each staff member has their own distinct password and
+// OTP code; the "Quick sign in" buttons below just autofill them.
+const DEMO_ACCOUNTS: Record<string, { password: string; otpCode: string; staffId: string }> = {
+  'sarah.jenkins': { password: 'Sarah#2024', otpCode: '111111', staffId: 'staff-sarah' },
+  'dave.tremblett': { password: 'Dave#2024', otpCode: '222222', staffId: 'staff-dave' },
+  'mary.power': { password: 'Mary#2024', otpCode: '333333', staffId: 'staff-mary' },
+  'olatundun.ndudim': { password: 'Olatundun#2024', otpCode: '444444', staffId: 'staff-olatundun' },
+  'derrick.pike': { password: 'Derrick#2024', otpCode: '555555', staffId: 'staff-derrick' },
+};
+
+/** Masks a phone number for display, e.g. "(709) 555-0211" -> "(•••) •••-0211". */
+function maskPhone(phone: string): string {
+  const digits = phone.replace(/\D/g, '');
+  if (digits.length < 4) return '••••';
+  const last4 = digits.slice(-4);
+  return phone.replace(/\d/g, '•').slice(0, -4) + last4;
 }
 
-export const LoginView: React.FC<LoginViewProps> = ({ onLogin }) => {
+/** Masks an email for display, e.g. "sarah.j@hihavenmanor.ca" -> "sa••••@hihavenmanor.ca". */
+function maskEmail(email: string): string {
+  const [local, domain] = email.split('@');
+  if (!domain) return '••••';
+  const visible = local.slice(0, 2);
+  return `${visible}${'•'.repeat(Math.max(local.length - 2, 3))}@${domain}`;
+}
+
+export const LoginView: React.FC<LoginViewProps> = ({ allStaff, onLogin }) => {
   const [step, setStep] = useState<Step>('login');
 
   // Layer one
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [loginErr, setLoginErr] = useState('');
-  const [loading, setLoading] = useState(false);
-
-  // Forgot username/password
-  const [forgotEmail, setForgotEmail] = useState('');
-  const [forgotMessage, setForgotMessage] = useState('');
 
   // Between layers
-  const [pendingToken, setPendingToken] = useState('');
-  const [staffPreview, setStaffPreview] = useState<{ name: string; role: string } | null>(null);
-  const [contact, setContact] = useState<{ maskedPhone: string; maskedEmail: string } | null>(null);
+  const [matchedStaff, setMatchedStaff] = useState<Staff | null>(null);
 
   // Layer two
   const [contactMode, setContactMode] = useState<'sms' | 'email'>('sms');
-  const [contactErr, setContactErr] = useState('');
-  const [devCode, setDevCode] = useState<string | null>(null);
   const [code, setCode] = useState(['', '', '', '', '', '']);
   const [codeErr, setCodeErr] = useState('');
   const [resendCooldown, setResendCooldown] = useState(0);
@@ -54,61 +65,51 @@ export const LoginView: React.FC<LoginViewProps> = ({ onLogin }) => {
     return () => clearTimeout(t);
   }, [resendCooldown]);
 
-  const handleLogin = async (e: React.FormEvent) => {
+  const handleLogin = (e: React.FormEvent) => {
     e.preventDefault();
+    const account = DEMO_ACCOUNTS[username.trim().toLowerCase()];
+    if (!account || account.password !== password) {
+      setLoginErr('Invalid username or password.');
+      return;
+    }
+    const staff = allStaff.find((s) => s.id === account.staffId);
+    if (!staff) {
+      setLoginErr('Demo account is not seeded. Contact an administrator.');
+      return;
+    }
     setLoginErr('');
-    setLoading(true);
-    const { ok, data } = await api('/api/auth/login', { username: username.trim(), password });
-    setLoading(false);
-    if (!ok) {
-      setLoginErr(data.error || 'Invalid username or password.');
-      return;
-    }
-    setPendingToken(data.pendingToken);
-    setStaffPreview(data.staff);
-    setContact(data.contact);
-    setStep('contact');
+    setMatchedStaff(staff);
     setContactMode('sms');
+    setStep('contact');
   };
 
-  const handleForgotSubmit = async (kind: 'username' | 'password') => {
-    if (!forgotEmail.trim()) return;
-    await api(kind === 'username' ? '/api/auth/forgot-username' : '/api/auth/forgot-password', { email: forgotEmail.trim() });
-    setForgotMessage(
-      kind === 'username'
-        ? "If that email matches an account, we've sent a username reminder."
-        : "If that email matches an account, we've sent password reset instructions."
-    );
-    setStep('forgot-sent');
+  const fillDemo = (demoUsername: string) => {
+    setUsername(demoUsername);
+    setPassword(DEMO_ACCOUNTS[demoUsername].password);
+    setLoginErr('');
   };
 
-  const sendCode = async () => {
-    setContactErr('');
-    const { ok, data } = await api('/api/auth/otp/send', { channel: contactMode }, pendingToken);
-    if (!ok) {
-      setContactErr(data.error || 'Could not send the code.');
-      return;
-    }
-    setDevCode(data.devCode || null);
+  const sendCode = () => {
     setCode(['', '', '', '', '', '']);
+    setCodeErr('');
     setStep('code');
     setResendCooldown(20);
     setTimeout(() => codeRefs.current[0]?.focus(), 0);
   };
 
-  const verifyCode = async () => {
+  const verifyCode = () => {
     const entered = code.join('');
     if (entered.length < 6) {
       setCodeErr('Enter all 6 digits.');
       return;
     }
-    setCodeErr('');
-    const { ok, data } = await api('/api/auth/otp/verify', { code: entered }, pendingToken);
-    if (!ok) {
-      setCodeErr(data.error || 'Incorrect code.');
+    const account = DEMO_ACCOUNTS[username.trim().toLowerCase()];
+    if (!matchedStaff || !account || entered !== account.otpCode) {
+      setCodeErr('Incorrect code.');
       return;
     }
-    onLogin(data.token, data.staff);
+    setCodeErr('');
+    onLogin(matchedStaff.id, matchedStaff);
   };
 
   const handleCodeInput = (idx: number, val: string) => {
@@ -179,64 +180,19 @@ export const LoginView: React.FC<LoginViewProps> = ({ onLogin }) => {
               <button
                 id="login-submit-btn"
                 type="submit"
-                disabled={loading}
-                className="w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-60 text-white text-sm font-semibold transition"
+                className="w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-semibold transition"
               >
                 <LogIn className="w-4 h-4" />
-                {loading ? 'Signing in…' : 'Sign In'}
+                Sign In
               </button>
-
-              <div className="flex items-center justify-between text-xs pt-1">
-                <button type="button" onClick={() => { setForgotMessage(''); setForgotEmail(''); setStep('forgot-username'); }} className="text-emerald-400 hover:text-emerald-300">
-                  Forgot username?
-                </button>
-                <button type="button" onClick={() => { setForgotMessage(''); setForgotEmail(''); setStep('forgot-password'); }} className="text-emerald-400 hover:text-emerald-300">
-                  Forgot password?
-                </button>
-              </div>
             </form>
-          )}
-
-          {(step === 'forgot-username' || step === 'forgot-password') && (
-            <div className="space-y-4">
-              <h2 className="text-sm font-bold text-white">{step === 'forgot-username' ? 'Forgot username' : 'Forgot password'}</h2>
-              <p className="text-xs text-slate-400">Enter the email on your staff profile.</p>
-              <div>
-                <label className="text-xs font-semibold text-slate-300 block mb-1">Email</label>
-                <input
-                  type="email"
-                  value={forgotEmail}
-                  onChange={(e) => setForgotEmail(e.target.value)}
-                  className="w-full px-3 py-2 rounded-lg bg-slate-800 border border-slate-700 text-sm text-white placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-emerald-500"
-                  placeholder="sarah.j@hihavenmanor.ca"
-                  autoFocus
-                />
-              </div>
-              <button
-                type="button"
-                onClick={() => handleForgotSubmit(step === 'forgot-username' ? 'username' : 'password')}
-                className="w-full px-4 py-2.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-semibold transition"
-              >
-                {step === 'forgot-username' ? 'Send reminder' : 'Send reset instructions'}
-              </button>
-              <BackButton onClick={() => setStep('login')} />
-            </div>
-          )}
-
-          {step === 'forgot-sent' && (
-            <div className="space-y-4">
-              <h2 className="text-sm font-bold text-white">Check that inbox</h2>
-              <p className="text-xs text-slate-300 bg-slate-800/60 border border-dashed border-slate-700 rounded-lg px-3 py-2.5">{forgotMessage}</p>
-              <p className="text-[11px] text-slate-500">This wording never confirms or denies an account exists.</p>
-              <BackButton onClick={() => setStep('login')} />
-            </div>
           )}
 
           {step === 'contact' && (
             <div className="space-y-4">
               <h2 className="text-sm font-bold text-white">Verify it's you</h2>
               <p className="text-xs text-slate-400">
-                Signed in as <strong className="text-slate-200">{staffPreview?.name}</strong>. Where should we send your code?
+                Signed in as <strong className="text-slate-200">{matchedStaff?.name}</strong>. Where should we send your code?
               </p>
               <div className="flex gap-2">
                 <button
@@ -255,9 +211,8 @@ export const LoginView: React.FC<LoginViewProps> = ({ onLogin }) => {
                 </button>
               </div>
               <p className="text-xs text-slate-400 font-mono bg-slate-800/60 rounded-lg px-3 py-2">
-                {contactMode === 'sms' ? contact?.maskedPhone : contact?.maskedEmail}
+                {matchedStaff && (contactMode === 'sms' ? maskPhone(matchedStaff.phone) : maskEmail(matchedStaff.email))}
               </p>
-              {contactErr && <p className="text-xs text-rose-400 bg-rose-500/10 border border-rose-500/30 rounded-lg px-3 py-2">{contactErr}</p>}
               <button
                 type="button"
                 onClick={sendCode}
@@ -273,7 +228,7 @@ export const LoginView: React.FC<LoginViewProps> = ({ onLogin }) => {
             <div className="space-y-4">
               <h2 className="text-sm font-bold text-white">Enter your code</h2>
               <p className="text-xs text-slate-400">
-                We sent a 6-digit code to {contactMode === 'sms' ? contact?.maskedPhone : contact?.maskedEmail}.
+                We sent a 6-digit code to {matchedStaff && (contactMode === 'sms' ? maskPhone(matchedStaff.phone) : maskEmail(matchedStaff.email))}.
               </p>
               <div className="flex gap-2">
                 {code.map((digit, i) => (
@@ -290,9 +245,9 @@ export const LoginView: React.FC<LoginViewProps> = ({ onLogin }) => {
                 ))}
               </div>
               {codeErr && <p className="text-xs text-rose-400 bg-rose-500/10 border border-rose-500/30 rounded-lg px-3 py-2">{codeErr}</p>}
-              {devCode && (
+              {username.trim().toLowerCase() in DEMO_ACCOUNTS && (
                 <p className="text-xs font-mono text-emerald-300 bg-emerald-500/10 border border-emerald-500/30 rounded-lg px-3 py-2 text-center">
-                  Dev mode — your code is <strong>{devCode}</strong> (no SMS/email provider configured)
+                  Demo mode — your code is <strong>{DEMO_ACCOUNTS[username.trim().toLowerCase()].otpCode}</strong>
                 </p>
               )}
               <button
@@ -316,14 +271,36 @@ export const LoginView: React.FC<LoginViewProps> = ({ onLogin }) => {
               <BackButton onClick={() => setStep('contact')} label="Back" />
             </div>
           )}
-
         </div>
 
         {step === 'login' && (
-          <div className="mt-4 flex items-center gap-1.5 text-[11px] text-slate-500 justify-center">
-            <ShieldCheck className="w-3.5 h-3.5" />
-            Two-factor sign-in: username &amp; password, then a code to your phone or email.
-          </div>
+          <>
+            <div className="mt-4 flex items-center gap-1.5 text-[11px] text-slate-500 justify-center">
+              <ShieldCheck className="w-3.5 h-3.5" />
+              Two-factor sign-in: username &amp; password, then a code to your phone or email.
+            </div>
+            <div className="mt-4 bg-slate-900/60 border border-slate-800 rounded-xl p-4">
+              <div className="text-[11px] font-semibold uppercase tracking-wider text-slate-400 mb-2">
+                Quick sign in (demo)
+              </div>
+              <div className="space-y-1.5">
+                {Object.entries(DEMO_ACCOUNTS).map(([demoUsername, account]) => {
+                  const staff = allStaff.find((s) => s.id === account.staffId);
+                  return (
+                    <button
+                      key={demoUsername}
+                      type="button"
+                      onClick={() => fillDemo(demoUsername)}
+                      className="w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg text-xs text-slate-300 hover:bg-slate-800 transition"
+                    >
+                      <span className="font-medium">{staff?.name || demoUsername}</span>
+                      <span className="text-slate-500 font-mono">{demoUsername} / {account.password}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          </>
         )}
       </div>
     </div>

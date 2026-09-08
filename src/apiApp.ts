@@ -13,11 +13,16 @@
 // this file's createApiApp() for local dev and traditional Node hosts
 // (Cloud Run, a VM, etc.).
 //
-// Authentication is two layers, both enforced here server-side (see
-// SECURITY.md): username + password gets a short-lived pending_2fa token,
-// then a one-time code to phone or email exchanges that for a real session
-// token. Every route below except /api/health and /api/auth/* requires a
-// valid session — see requireAuth().
+// Login itself is checked entirely client-side (see LoginView.tsx) against
+// a fixed, hardcoded credential list — not here. That's deliberate: an
+// earlier version of this checked username/password/OTP server-side and
+// issued a cryptographically signed session token, but the multi-request
+// round trip that requires (login, then otp/send, then otp/verify) proved
+// unreliable on Vercel's serverless runtime. Since this is a demo with no
+// real security requirement, requireAuth() below only checks that the
+// bearer token names a real staff id — see its comment for why that's
+// good enough here and not in a real deployment. Every route below except
+// /api/health requires that token.
 import express from 'express';
 import {
   INITIAL_ORGANIZATION,
@@ -40,7 +45,6 @@ import {
   INITIAL_TASK_DEFINITIONS,
   INITIAL_SHIFT_TASK_TEMPLATES,
 } from './seedData';
-import { SEED_PASSWORDS, SEED_OTP_CODES } from './seedData.auth';
 import {
   AuditEvent,
   IncidentReport,
@@ -57,8 +61,6 @@ import {
 } from './types';
 import { ensureShiftTasksGenerated } from './shiftTasks';
 import { computeExceptions } from './exceptions';
-import { createToken, verifyToken } from './lib/auth';
-import { sendSms, sendEmail, maskPhone, maskEmail } from './services/notificationDeliveryService';
 
 // Persisted review state for a computed exception, keyed by the exception's
 // deterministic id (see src/exceptions.ts). Exceptions themselves are never
@@ -131,37 +133,21 @@ export function recordEvent(
 
 // ==========================================
 // AUTHENTICATION
-// Two layers: username + password (layer one), then a one-time code to
-// phone or email (layer two / the actual 2FA). See SECURITY.md.
 //
-// DEMO-ONLY: every credential and OTP code is a fixed hardcoded literal
-// from src/seedData.auth.ts — no password hashing, no generated OTP codes,
-// no in-memory Map tracking pending state between requests. That's
-// deliberate: Vercel serverless functions don't guarantee that the
-// separate requests making up a login flow (login, then otp/send, then
-// otp/verify) land on the same warm instance, so a Map-based "pending OTP"
-// or "pending reset token" can vanish between steps on a cold start. Fixed
-// literals sidestep that entirely. See SECURITY.md for what a real
-// deployment needs instead.
+// DEMO-ONLY: login (username/password, then a phone/email OTP code) is
+// checked entirely client-side in LoginView.tsx against a fixed, hardcoded
+// credential list — there is no server-side login endpoint at all. An
+// earlier version checked credentials here and issued a cryptographically
+// signed session token, but that required the client to complete a
+// multi-request round trip (login, then otp/send, then otp/verify) that
+// proved unreliable in practice on Vercel's serverless runtime. Since this
+// app has no real security requirement (it's a demo, not a deployment
+// handling real resident data), the bearer token every other route expects
+// is simply the staff member's own id — LoginView.tsx sets it directly
+// once it has checked the hardcoded credentials, with no server call
+// needed to obtain it. See SECURITY.md for what a real deployment needs
+// instead of this.
 // ==========================================
-
-const SESSION_SECRET = process.env.SESSION_SECRET || 'INSECURE-DEV-ONLY-SESSION-SECRET-CHANGE-ME';
-if (!process.env.SESSION_SECRET) {
-  console.warn('[SECURITY] SESSION_SECRET is not set. Using an insecure development default — set SESSION_SECRET before deploying.');
-}
-
-const PENDING_2FA_TTL_SECONDS = 5 * 60;
-const SESSION_TTL_SECONDS = 12 * 60 * 60;
-
-function findStaffByUsername(username: string): Staff | undefined {
-  const needle = username.trim().toLowerCase();
-  return dbState.staff.find((s) => s.username.toLowerCase() === needle);
-}
-
-function findStaffByEmail(email: string): Staff | undefined {
-  const needle = email.trim().toLowerCase();
-  return dbState.staff.find((s) => s.email.toLowerCase() === needle);
-}
 
 export interface AuthedRequest extends express.Request {
   staff?: Staff;
@@ -173,38 +159,16 @@ function getBearerToken(req: express.Request): string | undefined {
   return header.slice('Bearer '.length);
 }
 
-/** Guards every route that needs a real signed-in staff member. */
+/** Guards every route that needs a signed-in staff member. The bearer
+ * token is just that staff member's id — see the file header above for
+ * why that's good enough for this demo. */
 export function requireAuth(req: AuthedRequest, res: express.Response, next: express.NextFunction) {
   const token = getBearerToken(req);
-  const payload = verifyToken(token, SESSION_SECRET);
-  if (!payload || payload.purpose !== 'session') {
+  const staffMember = token ? dbState.staff.find((s) => s.id === token) : undefined;
+  if (!staffMember) {
     return res.status(401).json({ error: 'Authentication required. Please sign in.' });
   }
-  const staffMember = dbState.staff.find((s) => s.id === payload.staffId);
-  if (!staffMember) {
-    return res.status(401).json({ error: 'Session is no longer valid. Please sign in again.' });
-  }
   req.staff = staffMember;
-  next();
-}
-
-/** Guards the OTP send/verify endpoints — accepts only a pending_2fa token
- * (issued by /api/auth/login after password verifies), never a full
- * session token, so a signed-in session can't be used to re-trigger OTPs
- * for a different account and a pending 2FA ticket can't be used as a
- * session elsewhere. */
-function requirePendingAuth(req: AuthedRequest & { pendingStaffId?: string }, res: express.Response, next: express.NextFunction) {
-  const token = getBearerToken(req);
-  const payload = verifyToken(token, SESSION_SECRET);
-  if (!payload || payload.purpose !== 'pending_2fa') {
-    return res.status(401).json({ error: 'Verification session expired. Please sign in again.' });
-  }
-  const staffMember = dbState.staff.find((s) => s.id === payload.staffId);
-  if (!staffMember) {
-    return res.status(401).json({ error: 'Verification session is no longer valid. Please sign in again.' });
-  }
-  (req as any).pendingStaffId = staffMember.id;
-  (req as any).pendingStaff = staffMember;
   next();
 }
 
@@ -257,132 +221,18 @@ export function createApiApp(): express.Express {
   // AUTHENTICATION
   // ==========================================
 
-  // API: Layer one — username + password. On success, issues a short-lived
-  // pending_2fa token (not a session) so the client can proceed to the OTP
-  // step without a session existing yet.
-  app.post('/api/auth/login', (req, res) => {
-    const { username, password } = req.body as { username?: string; password?: string };
-    if (!username || !password) {
-      return res.status(400).json({ error: 'Username and password are required.' });
-    }
-
-    const staffMember = findStaffByUsername(username);
-    const expectedPassword = staffMember ? SEED_PASSWORDS[staffMember.id] : undefined;
-
-    // Constant-shape response whether the username doesn't exist or the
-    // password is wrong — never reveal which one failed.
-    if (!staffMember || !expectedPassword || password !== expectedPassword) {
-      recordEvent('anonymous', username, 'LOGIN_FAILED', 'staff', staffMember?.id || 'unknown', { reason: 'invalid_credentials' });
-      return res.status(401).json({ error: 'Invalid username or password.' });
-    }
-
-    const pendingToken = createToken(
-      { purpose: 'pending_2fa', staffId: staffMember.id, role: staffMember.role, homeId: staffMember.home_id },
-      SESSION_SECRET,
-      PENDING_2FA_TTL_SECONDS
-    );
-
-    recordEvent(staffMember.id, staffMember.name, 'LOGIN_PASSWORD_VERIFIED', 'staff', staffMember.id, {});
-    res.json({
-      success: true,
-      pendingToken,
-      staff: { name: staffMember.name, role: staffMember.role },
-      contact: { maskedPhone: maskPhone(staffMember.phone), maskedEmail: maskEmail(staffMember.email) },
-    });
-  });
-
-  // API: Layer two, step 1 — send a one-time code to the chosen contact
-  // method. Requires the pending_2fa token from /api/auth/login.
-  app.post('/api/auth/otp/send', requirePendingAuth, async (req: any, res) => {
-    const { channel } = req.body as { channel?: 'sms' | 'email' };
-    if (channel !== 'sms' && channel !== 'email') {
-      return res.status(400).json({ error: 'channel must be "sms" or "email".' });
-    }
-    const staffMember: Staff = req.pendingStaff;
-    const destination = channel === 'sms' ? staffMember.phone : staffMember.email;
-    const code = SEED_OTP_CODES[staffMember.id];
-
-    const message = `Your CareHomeOS verification code is ${code}. This is a fixed demo code.`;
-    const result = channel === 'sms' ? await sendSms(destination, message) : await sendEmail(destination, 'Your CareHomeOS verification code', message);
-
-    if (!result.success) {
-      return res.status(502).json({ error: `Could not send the code by ${channel === 'sms' ? 'text' : 'email'}. Try the other option.` });
-    }
-
-    res.json({
-      success: true,
-      maskedDestination: channel === 'sms' ? maskPhone(destination) : maskEmail(destination),
-      // Only ever present when no real provider is configured — see
-      // notificationDeliveryService.ts. A configured deployment never
-      // returns the code in the response body.
-      devCode: result.devMode ? code : undefined,
-    });
-  });
-
-  // API: Layer two, step 2 — verify the code and issue a real session.
-  app.post('/api/auth/otp/verify', requirePendingAuth, (req: any, res) => {
-    const { code } = req.body as { code?: string };
-    const staffMember: Staff = req.pendingStaff;
-    const expectedCode = SEED_OTP_CODES[staffMember.id];
-
-    if (!expectedCode || code !== expectedCode) {
-      return res.status(401).json({ error: 'Incorrect code.' });
-    }
-
-    const token = createToken(
-      { purpose: 'session', staffId: staffMember.id, role: staffMember.role, homeId: staffMember.home_id },
-      SESSION_SECRET,
-      SESSION_TTL_SECONDS
-    );
-
-    recordEvent(staffMember.id, staffMember.name, 'LOGIN_SUCCESS', 'staff', staffMember.id, {});
-    res.json({ success: true, token, staff: staffMember });
-  });
-
-  // API: Resolve the current session
+  // API: Resolve the current session. Login itself has no server endpoint
+  // — see the file header above — but once LoginView.tsx has a staff id to
+  // use as a bearer token, this lets a page reload confirm it's still
+  // valid (the staff member still exists) before trusting it.
   app.get('/api/auth/me', requireAuth, (req: AuthedRequest, res) => {
     res.json({ staff: req.staff });
   });
 
-  // API: Logout (primarily client-side token discard; recorded for audit)
+  // API: Logout (client-side token discard; recorded for audit)
   app.post('/api/auth/logout', requireAuth, (req: AuthedRequest, res) => {
     recordEvent(req.staff!.id, req.staff!.name, 'LOGOUT', 'staff', req.staff!.id, {});
     res.json({ success: true });
-  });
-
-  // API: Forgot username — always returns a generic success regardless of
-  // whether the email matches an account, so this endpoint can't be used
-  // to enumerate valid staff emails.
-  app.post('/api/auth/forgot-username', async (req, res) => {
-    const { email } = req.body as { email?: string };
-    if (email) {
-      const staffMember = findStaffByEmail(email);
-      if (staffMember) {
-        await sendEmail(
-          staffMember.email,
-          'Your CareHomeOS username',
-          `Your username is ${staffMember.username}. If you didn't request this, you can ignore this email.`
-        );
-        recordEvent(staffMember.id, staffMember.name, 'USERNAME_RECOVERY_SENT', 'staff', staffMember.id, {});
-      }
-    }
-    res.json({ success: true, message: "If that email matches an account, we've sent a username reminder." });
-  });
-
-  // API: Forgot password — same non-revealing shape as forgot-username.
-  // DEMO-ONLY: this build has no self-serve password reset (every password
-  // is a fixed literal in src/seedData.auth.ts) — this endpoint just tells
-  // the requester to contact an administrator, without revealing whether
-  // the email matches an account.
-  app.post('/api/auth/forgot-password', async (req, res) => {
-    const { email } = req.body as { email?: string };
-    if (email) {
-      const staffMember = findStaffByEmail(email);
-      if (staffMember) {
-        recordEvent(staffMember.id, staffMember.name, 'PASSWORD_RESET_REQUESTED', 'staff', staffMember.id, {});
-      }
-    }
-    res.json({ success: true, message: "If that email matches an account, an administrator will be in touch with password reset instructions." });
   });
 
   // API: Get Full State (Scoped to current home_id; requires an authenticated session)

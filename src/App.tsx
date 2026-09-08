@@ -207,8 +207,9 @@ export default function App() {
     bootstrap();
   }, []);
 
-  // Called by LoginView once the full sign-in flow (password + OTP, and
-  // set-new-password if required) completes with a real session token.
+  // Called by LoginView once the full sign-in flow (password, then OTP)
+  // completes. The token is just that staff member's id — see
+  // src/apiApp.ts's requireAuth for why that's good enough for this demo.
   const handleLogin = async (newToken: string, staff: Staff) => {
     try { localStorage.setItem(TOKEN_STORAGE_KEY, newToken); } catch {}
     setToken(newToken);
@@ -251,7 +252,7 @@ export default function App() {
   // every render) so everything below this point can safely treat
   // currentStaff as non-null.
   if (!currentStaff) {
-    return <LoginView onLogin={handleLogin} />;
+    return <LoginView allStaff={staffList} onLogin={handleLogin} />;
   }
 
   // Clock In / Out Toggle Handler
