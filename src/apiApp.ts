@@ -160,6 +160,19 @@ function requireRole(...roles: Array<Staff['role']>) {
   };
 }
 
+// Role tiers, low to high: Care Worker -> Supervisor -> Manager -> Owner.
+// Supervisor is a shift-lead tier: full review/approval authority (incident
+// review, reassessments, shift-change approvals, time entry corrections)
+// but not the business-admin tier (CRM pipeline, compliance dashboard,
+// shift template management, QuickBooks Time sync) reserved for
+// Manager/Owner.
+const REVIEW_TIER_ROLES: Array<Staff['role']> = ['Supervisor', 'Manager', 'Owner'];
+const BUSINESS_ADMIN_ROLES: Array<Staff['role']> = ['Manager', 'Owner'];
+
+function isReviewTier(role: Staff['role']): boolean {
+  return REVIEW_TIER_ROLES.includes(role);
+}
+
 /**
  * Rejects requests where the body claims to act as a different staff member
  * than the authenticated session. Closes the identity-spoofing hole in the
@@ -349,7 +362,7 @@ export function createApiApp(): express.Express {
   });
 
   // API: Convert Prospect to Resident (Lifecycle Spine)
-  app.post('/api/prospects/convert', requireAuth, requireRole('Manager', 'Owner'), (req: AuthedRequest, res) => {
+  app.post('/api/prospects/convert', requireAuth, requireRole(...BUSINESS_ADMIN_ROLES), (req: AuthedRequest, res) => {
     const { prospectId, roomNumber, levelOfCare, actorId, actorName } = req.body;
     if (!requireSelf(req, res, actorId)) return;
 
@@ -523,7 +536,7 @@ export function createApiApp(): express.Express {
   });
 
   // API: Incident Review (Approve / Reject) with SEGREGATION OF DUTIES
-  app.post('/api/incidents/review', requireAuth, requireRole('Manager', 'Owner'), (req: AuthedRequest, res) => {
+  app.post('/api/incidents/review', requireAuth, requireRole(...REVIEW_TIER_ROLES), (req: AuthedRequest, res) => {
     const { incidentId, reviewerId, reviewerName, reviewerRole, action, rejectionReason } = req.body;
     if (!requireSelf(req, res, reviewerId)) return;
 
@@ -571,7 +584,7 @@ export function createApiApp(): express.Express {
   });
 
   // API: Complete Reassessment (NL AG finding backlog clearance)
-  app.post('/api/reassessments/complete', requireAuth, requireRole('Manager', 'Owner'), (req: AuthedRequest, res) => {
+  app.post('/api/reassessments/complete', requireAuth, requireRole(...REVIEW_TIER_ROLES), (req: AuthedRequest, res) => {
     const { reassessmentId, completedBy, outcomeNotes, newCarePlanCreated } = req.body;
     if (!requireSelf(req, res, completedBy)) return;
 
@@ -599,10 +612,10 @@ export function createApiApp(): express.Express {
   // ==========================================
 
   // API: List time entries (own entries for Care Workers; full roster for
-  // Manager/Owner) — the append-only punch ledger behind payroll/QuickBooks
-  // Time sync.
+  // Supervisor/Manager/Owner) — the append-only punch ledger behind
+  // payroll/QuickBooks Time sync.
   app.get('/api/time-entries', requireAuth, (req: AuthedRequest, res) => {
-    const isManager = req.staff!.role === 'Manager' || req.staff!.role === 'Owner';
+    const isManager = isReviewTier(req.staff!.role);
     const entries = isManager
       ? dbState.timeEntries
       : dbState.timeEntries.filter((t) => t.staff_id === req.staff!.id);
@@ -611,7 +624,7 @@ export function createApiApp(): express.Express {
 
   // API: Record a time entry punch. Staff may only punch for themselves;
   // recording a punch on someone else's behalf is a correction and is
-  // restricted to Manager/Owner with a mandatory reason.
+  // restricted to Supervisor/Manager/Owner with a mandatory reason.
   app.post('/api/time-entries', requireAuth, async (req: AuthedRequest, res) => {
     const { staffId, shiftAssignmentId, entryType, correctionReason } = req.body as {
       staffId: string;
@@ -621,10 +634,10 @@ export function createApiApp(): express.Express {
     };
 
     const isOwnEntry = staffId === req.staff!.id;
-    const isManager = req.staff!.role === 'Manager' || req.staff!.role === 'Owner';
+    const isManager = isReviewTier(req.staff!.role);
 
     if (!isOwnEntry && !isManager) {
-      return res.status(403).json({ error: 'Only a Manager or Owner may record a time entry correction for another staff member.' });
+      return res.status(403).json({ error: 'Only a Supervisor, Manager, or Owner may record a time entry correction for another staff member.' });
     }
     if (!isOwnEntry && (!correctionReason || !correctionReason.trim())) {
       return res.status(400).json({ error: 'A correction reason is required when recording a time entry for another staff member.' });
@@ -672,7 +685,7 @@ export function createApiApp(): express.Express {
   });
 
   // API: Create or update a shift template (Manager/Owner only)
-  app.post('/api/shift-templates', requireAuth, requireRole('Manager', 'Owner'), (req: AuthedRequest, res) => {
+  app.post('/api/shift-templates', requireAuth, requireRole(...BUSINESS_ADMIN_ROLES), (req: AuthedRequest, res) => {
     const templateData: ShiftTemplate = req.body;
     const existingIndex = dbState.shiftTemplates.findIndex((t) => t.id === templateData.id);
 
@@ -692,9 +705,9 @@ export function createApiApp(): express.Express {
   });
 
   // API: List shift change requests (own requests for Care Workers; all
-  // pending + own for Manager/Owner so approvals are visible)
+  // pending + own for Supervisor/Manager/Owner so approvals are visible)
   app.get('/api/shift-change-requests', requireAuth, (req: AuthedRequest, res) => {
-    const isManager = req.staff!.role === 'Manager' || req.staff!.role === 'Owner';
+    const isManager = isReviewTier(req.staff!.role);
     const requests = isManager
       ? dbState.shiftChangeRequests
       : dbState.shiftChangeRequests.filter((r) => r.requested_by === req.staff!.id);
@@ -754,7 +767,7 @@ export function createApiApp(): express.Express {
 
   // API: Review a shift change request — Manager/Owner only, with
   // segregation of duties (a manager cannot approve their own request).
-  app.post('/api/shift-change-requests/:id/review', requireAuth, requireRole('Manager', 'Owner'), (req: AuthedRequest, res) => {
+  app.post('/api/shift-change-requests/:id/review', requireAuth, requireRole(...REVIEW_TIER_ROLES), (req: AuthedRequest, res) => {
     const { action, reviewNotes } = req.body as { action: 'approve' | 'deny'; reviewNotes?: string };
     const request = dbState.shiftChangeRequests.find((r) => r.id === req.params.id);
 
@@ -800,7 +813,7 @@ export function createApiApp(): express.Express {
   // API: Manually trigger a sync pass over unsynced time entries
   // (Manager/Owner only). A production deployment would run this on a
   // schedule instead of on demand.
-  app.post('/api/integrations/quickbooks-time/sync', requireAuth, requireRole('Manager', 'Owner'), async (req: AuthedRequest, res) => {
+  app.post('/api/integrations/quickbooks-time/sync', requireAuth, requireRole(...BUSINESS_ADMIN_ROLES), async (req: AuthedRequest, res) => {
     const unsynced = dbState.timeEntries.filter((t) => !t.qbo_synced);
     let syncedCount = 0;
 

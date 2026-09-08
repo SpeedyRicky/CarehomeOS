@@ -97,6 +97,22 @@ export const INITIAL_STAFF: Staff[] = [
     ],
   },
   {
+    id: 'staff-linda',
+    home_id: 'home-nl-01',
+    name: 'Linda Squires',
+    role: 'Supervisor',
+    email: 'l.squires@hihavenmanor.ca',
+    phone: '(709) 555-0266',
+    mfa_enabled: true,
+    schedule_type: 'rotating_shifts',
+    credentials: [
+      { id: 'c-19', type: 'Standard First Aid & CPR Level C', title: 'Standard First Aid & CPR Level C', certificate_number: 'SFA-NL-5512', status: 'valid', expires_at: '2027-06-01', document_ref: 'DOC-FA-521' },
+      { id: 'c-20', type: 'Certificate of Conduct (Police / RNC)', title: 'Certificate of Conduct (Police / RNC)', certificate_number: 'RNC-CC-2023-771', status: 'valid', expires_at: '2027-02-18', document_ref: 'DOC-RNC-771' },
+      { id: 'c-21', type: 'Vulnerable Sector Check', title: 'Vulnerable Sector Check', certificate_number: 'VSC-NL-2290', status: 'valid', expires_at: '2027-02-18', document_ref: 'DOC-VSC-771' },
+      { id: 'c-22', type: 'Immunization Record', title: 'Immunization Record (Mantoux / HepB)', certificate_number: 'IMM-NL-4471', status: 'valid', expires_at: '2028-03-09', document_ref: 'DOC-IMM-471' },
+    ],
+  },
+  {
     id: 'staff-sarah',
     home_id: 'home-nl-01',
     name: 'Sarah Jenkins',
