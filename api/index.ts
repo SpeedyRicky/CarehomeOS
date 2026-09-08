@@ -10,21 +10,31 @@
 // project, which is exactly what caused this to 404 in production before.
 // Vercel's Node.js runtime accepts an Express app as the default export
 // and calls it directly as the request handler — see createApiApp() in
-// ../server.ts for the actual route definitions.
+// ../src/apiApp.ts for the actual route definitions.
+//
+// This imports createApiApp() from src/apiApp.ts, NOT from ../server —
+// server.ts additionally wraps it with Vite's dev middleware and static
+// file serving for local dev / Cloud Run, none of which belongs anywhere
+// near this function. Importing ../server here would have pulled all of
+// that (including a dynamic `import('vite')`) into what Vercel's function
+// bundler has to reason about, purely because it lived in the same file —
+// exactly the kind of extra surface area worth eliminating structurally
+// rather than trusting a runtime env-var check to route around it. See
+// src/apiApp.ts's file header for the full reasoning.
 //
 // IMPORTANT — read this before assuming login/data issues are fixed by
 // deploying this file alone: this app's data store (`dbState` in
-// server.ts) is a plain in-memory object. Vercel serverless functions are
-// not a persistent process — each cold start gets a fresh, empty-of-writes
-// copy of that seed data, and concurrent invocations may not share state
-// at all. Login itself works fine (credentials are static seed data), but
-// any write (clock in/out, incidents, shift-change requests, etc.) is not
-// guaranteed to persist or be visible across requests on Vercel. Treat a
-// Vercel deployment of this app as a login/UI demo only until the data
-// layer moves to a real database (see ARCHITECTURE.md "Prototype →
-// Production").
+// src/apiApp.ts) is a plain in-memory object. Vercel serverless functions
+// are not a persistent process — each cold start gets a fresh,
+// empty-of-writes copy of that seed data, and concurrent invocations may
+// not share state at all. Login itself works fine (credentials are static
+// seed data), but any write (clock in/out, incidents, shift-change
+// requests, etc.) is not guaranteed to persist or be visible across
+// requests on Vercel. Treat a Vercel deployment of this app as a login/UI
+// demo only until the data layer moves to a real database (see
+// ARCHITECTURE.md "Prototype → Production").
 import type { Request, Response } from 'express';
-import { createApiApp } from '../server';
+import { createApiApp } from '../src/apiApp';
 
 // createApiApp() runs at module-load time (before any request lands), so a
 // throw here is exactly the class of bug that produced the login 500 this
