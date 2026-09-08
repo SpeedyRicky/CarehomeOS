@@ -6,7 +6,7 @@ interface LoginViewProps {
   onLogin: (token: string, staff: Staff) => void;
 }
 
-type Step = 'login' | 'forgot-username' | 'forgot-password' | 'forgot-sent' | 'contact' | 'code' | 'set-password';
+type Step = 'login' | 'forgot-username' | 'forgot-password' | 'forgot-sent' | 'contact' | 'code';
 
 async function api(path: string, body: any, token?: string) {
   const res = await fetch(path, {
@@ -38,9 +38,6 @@ export const LoginView: React.FC<LoginViewProps> = ({ onLogin }) => {
   const [pendingToken, setPendingToken] = useState('');
   const [staffPreview, setStaffPreview] = useState<{ name: string; role: string } | null>(null);
   const [contact, setContact] = useState<{ maskedPhone: string; maskedEmail: string } | null>(null);
-  const [mustChangePassword, setMustChangePassword] = useState(false);
-  const [sessionToken, setSessionToken] = useState('');
-  const [loggedInStaff, setLoggedInStaff] = useState<Staff | null>(null);
 
   // Layer two
   const [contactMode, setContactMode] = useState<'sms' | 'email'>('sms');
@@ -50,11 +47,6 @@ export const LoginView: React.FC<LoginViewProps> = ({ onLogin }) => {
   const [codeErr, setCodeErr] = useState('');
   const [resendCooldown, setResendCooldown] = useState(0);
   const codeRefs = useRef<(HTMLInputElement | null)[]>([]);
-
-  // Forced password change
-  const [newPassword, setNewPassword] = useState('');
-  const [newPassword2, setNewPassword2] = useState('');
-  const [setPasswordErr, setSetPasswordErr] = useState('');
 
   useEffect(() => {
     if (resendCooldown <= 0) return;
@@ -75,7 +67,6 @@ export const LoginView: React.FC<LoginViewProps> = ({ onLogin }) => {
     setPendingToken(data.pendingToken);
     setStaffPreview(data.staff);
     setContact(data.contact);
-    setMustChangePassword(!!data.mustChangePassword);
     setStep('contact');
     setContactMode('sms');
   };
@@ -117,30 +108,7 @@ export const LoginView: React.FC<LoginViewProps> = ({ onLogin }) => {
       setCodeErr(data.error || 'Incorrect code.');
       return;
     }
-    setSessionToken(data.token);
-    setLoggedInStaff(data.staff);
-    if (data.mustChangePassword) {
-      setStep('set-password');
-    } else {
-      onLogin(data.token, data.staff);
-    }
-  };
-
-  const submitNewPassword = async () => {
-    if (newPassword.length < 8) {
-      setSetPasswordErr('New password must be at least 8 characters.');
-      return;
-    }
-    if (newPassword !== newPassword2) {
-      setSetPasswordErr('Passwords do not match.');
-      return;
-    }
-    const { ok, data } = await api('/api/auth/set-initial-password', { newPassword }, sessionToken);
-    if (!ok) {
-      setSetPasswordErr(data.error || 'Could not set a new password.');
-      return;
-    }
-    if (loggedInStaff) onLogin(sessionToken, loggedInStaff);
+    onLogin(data.token, data.staff);
   };
 
   const handleCodeInput = (idx: number, val: string) => {
@@ -349,40 +317,6 @@ export const LoginView: React.FC<LoginViewProps> = ({ onLogin }) => {
             </div>
           )}
 
-          {step === 'set-password' && (
-            <div className="space-y-4">
-              <h2 className="text-sm font-bold text-white">Set a new password</h2>
-              <p className="text-xs text-slate-400">Your account was provisioned with a temporary password. Choose a new one before continuing.</p>
-              <div>
-                <label className="text-xs font-semibold text-slate-300 block mb-1">New password</label>
-                <input
-                  type="password"
-                  value={newPassword}
-                  onChange={(e) => setNewPassword(e.target.value)}
-                  className="w-full px-3 py-2 rounded-lg bg-slate-800 border border-slate-700 text-sm text-white focus:outline-none focus:ring-1 focus:ring-emerald-500"
-                  placeholder="At least 8 characters"
-                  autoFocus
-                />
-              </div>
-              <div>
-                <label className="text-xs font-semibold text-slate-300 block mb-1">Confirm new password</label>
-                <input
-                  type="password"
-                  value={newPassword2}
-                  onChange={(e) => setNewPassword2(e.target.value)}
-                  className="w-full px-3 py-2 rounded-lg bg-slate-800 border border-slate-700 text-sm text-white focus:outline-none focus:ring-1 focus:ring-emerald-500"
-                />
-              </div>
-              {setPasswordErr && <p className="text-xs text-rose-400 bg-rose-500/10 border border-rose-500/30 rounded-lg px-3 py-2">{setPasswordErr}</p>}
-              <button
-                type="button"
-                onClick={submitNewPassword}
-                className="w-full px-4 py-2.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-semibold transition"
-              >
-                Set password &amp; continue
-              </button>
-            </div>
-          )}
         </div>
 
         {step === 'login' && (

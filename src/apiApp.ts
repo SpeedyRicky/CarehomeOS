@@ -40,7 +40,7 @@ import {
   INITIAL_TASK_DEFINITIONS,
   INITIAL_SHIFT_TASK_TEMPLATES,
 } from './seedData';
-import { SEED_USERNAMES, SEED_PASSWORD_HASHES, SEED_MUST_CHANGE_PASSWORD } from './seedData.auth';
+import { SEED_PASSWORDS, SEED_OTP_CODES } from './seedData.auth';
 import {
   AuditEvent,
   IncidentReport,
@@ -57,14 +57,7 @@ import {
 } from './types';
 import { ensureShiftTasksGenerated } from './shiftTasks';
 import { computeExceptions } from './exceptions';
-import {
-  hashPassword,
-  verifyPassword,
-  createToken,
-  verifyToken,
-  generateOtpCode,
-  generateResetToken,
-} from './lib/auth';
+import { createToken, verifyToken } from './lib/auth';
 import { sendSms, sendEmail, maskPhone, maskEmail } from './services/notificationDeliveryService';
 
 // Persisted review state for a computed exception, keyed by the exception's
@@ -141,10 +134,15 @@ export function recordEvent(
 // Two layers: username + password (layer one), then a one-time code to
 // phone or email (layer two / the actual 2FA). See SECURITY.md.
 //
-// Everything in this block that's sensitive — password hashes, pending OTP
-// codes, pending password-reset tokens — lives in module-level state here,
-// NEVER inside dbState. dbState is what /api/state serializes wholesale to
-// the client; anything added to it ships to the browser.
+// DEMO-ONLY: every credential and OTP code is a fixed hardcoded literal
+// from src/seedData.auth.ts — no password hashing, no generated OTP codes,
+// no in-memory Map tracking pending state between requests. That's
+// deliberate: Vercel serverless functions don't guarantee that the
+// separate requests making up a login flow (login, then otp/send, then
+// otp/verify) land on the same warm instance, so a Map-based "pending OTP"
+// or "pending reset token" can vanish between steps on a cold start. Fixed
+// literals sidestep that entirely. See SECURITY.md for what a real
+// deployment needs instead.
 // ==========================================
 
 const SESSION_SECRET = process.env.SESSION_SECRET || 'INSECURE-DEV-ONLY-SESSION-SECRET-CHANGE-ME';
@@ -154,43 +152,6 @@ if (!process.env.SESSION_SECRET) {
 
 const PENDING_2FA_TTL_SECONDS = 5 * 60;
 const SESSION_TTL_SECONDS = 12 * 60 * 60;
-const OTP_TTL_MS = 5 * 60 * 1000;
-const OTP_MAX_ATTEMPTS = 5;
-const RESET_TOKEN_TTL_MS = 30 * 60 * 1000;
-
-interface StaffAuthRecord {
-  passwordHash: string;
-  mustChangePassword: boolean;
-}
-
-// Seeded from src/seedData.auth.ts, mutated in place as passwords change
-// (change-password / reset-password). Keyed by staff id.
-const staffAuth: Record<string, StaffAuthRecord> = Object.fromEntries(
-  Object.keys(SEED_PASSWORD_HASHES).map((staffId) => [
-    staffId,
-    { passwordHash: SEED_PASSWORD_HASHES[staffId], mustChangePassword: !!SEED_MUST_CHANGE_PASSWORD[staffId] },
-  ])
-);
-
-interface PendingOtp {
-  code: string;
-  channel: 'sms' | 'email';
-  destination: string;
-  expiresAt: number;
-  attempts: number;
-}
-
-// Keyed by staff id — one live OTP per staff member at a time; requesting a
-// new one (send or resend) overwrites whatever was pending.
-const pendingOtps = new Map<string, PendingOtp>();
-
-interface PendingReset {
-  staffId: string;
-  expiresAt: number;
-}
-
-// Keyed by the single-use reset token itself.
-const pendingResets = new Map<string, PendingReset>();
 
 function findStaffByUsername(username: string): Staff | undefined {
   const needle = username.trim().toLowerCase();
@@ -306,11 +267,11 @@ export function createApiApp(): express.Express {
     }
 
     const staffMember = findStaffByUsername(username);
-    const auth = staffMember ? staffAuth[staffMember.id] : undefined;
+    const expectedPassword = staffMember ? SEED_PASSWORDS[staffMember.id] : undefined;
 
     // Constant-shape response whether the username doesn't exist or the
     // password is wrong — never reveal which one failed.
-    if (!staffMember || !auth || !verifyPassword(password, auth.passwordHash)) {
+    if (!staffMember || !expectedPassword || password !== expectedPassword) {
       recordEvent('anonymous', username, 'LOGIN_FAILED', 'staff', staffMember?.id || 'unknown', { reason: 'invalid_credentials' });
       return res.status(401).json({ error: 'Invalid username or password.' });
     }
@@ -327,7 +288,6 @@ export function createApiApp(): express.Express {
       pendingToken,
       staff: { name: staffMember.name, role: staffMember.role },
       contact: { maskedPhone: maskPhone(staffMember.phone), maskedEmail: maskEmail(staffMember.email) },
-      mustChangePassword: auth.mustChangePassword,
     });
   });
 
@@ -340,17 +300,9 @@ export function createApiApp(): express.Express {
     }
     const staffMember: Staff = req.pendingStaff;
     const destination = channel === 'sms' ? staffMember.phone : staffMember.email;
-    const code = generateOtpCode();
+    const code = SEED_OTP_CODES[staffMember.id];
 
-    pendingOtps.set(staffMember.id, {
-      code,
-      channel,
-      destination,
-      expiresAt: Date.now() + OTP_TTL_MS,
-      attempts: 0,
-    });
-
-    const message = `Your CareHomeOS verification code is ${code}. It expires in 5 minutes.`;
+    const message = `Your CareHomeOS verification code is ${code}. This is a fixed demo code.`;
     const result = channel === 'sms' ? await sendSms(destination, message) : await sendEmail(destination, 'Your CareHomeOS verification code', message);
 
     if (!result.success) {
@@ -371,30 +323,20 @@ export function createApiApp(): express.Express {
   app.post('/api/auth/otp/verify', requirePendingAuth, (req: any, res) => {
     const { code } = req.body as { code?: string };
     const staffMember: Staff = req.pendingStaff;
-    const pending = pendingOtps.get(staffMember.id);
+    const expectedCode = SEED_OTP_CODES[staffMember.id];
 
-    if (!pending || Date.now() > pending.expiresAt) {
-      return res.status(401).json({ error: 'That code has expired. Request a new one.' });
-    }
-    if (pending.attempts >= OTP_MAX_ATTEMPTS) {
-      pendingOtps.delete(staffMember.id);
-      return res.status(429).json({ error: 'Too many incorrect attempts. Request a new code.' });
-    }
-    if (code !== pending.code) {
-      pending.attempts += 1;
+    if (!expectedCode || code !== expectedCode) {
       return res.status(401).json({ error: 'Incorrect code.' });
     }
 
-    pendingOtps.delete(staffMember.id);
-    const auth = staffAuth[staffMember.id];
     const token = createToken(
       { purpose: 'session', staffId: staffMember.id, role: staffMember.role, homeId: staffMember.home_id },
       SESSION_SECRET,
       SESSION_TTL_SECONDS
     );
 
-    recordEvent(staffMember.id, staffMember.name, 'LOGIN_SUCCESS', 'staff', staffMember.id, { channel: pending.channel });
-    res.json({ success: true, token, staff: staffMember, mustChangePassword: auth?.mustChangePassword ?? false });
+    recordEvent(staffMember.id, staffMember.name, 'LOGIN_SUCCESS', 'staff', staffMember.id, {});
+    res.json({ success: true, token, staff: staffMember });
   });
 
   // API: Resolve the current session
@@ -405,42 +347,6 @@ export function createApiApp(): express.Express {
   // API: Logout (primarily client-side token discard; recorded for audit)
   app.post('/api/auth/logout', requireAuth, (req: AuthedRequest, res) => {
     recordEvent(req.staff!.id, req.staff!.name, 'LOGOUT', 'staff', req.staff!.id, {});
-    res.json({ success: true });
-  });
-
-  // API: Change password while signed in (also clears mustChangePassword —
-  // this is what the forced first-login password change calls).
-  app.post('/api/auth/change-password', requireAuth, (req: AuthedRequest, res) => {
-    const { currentPassword, newPassword } = req.body as { currentPassword?: string; newPassword?: string };
-    const auth = staffAuth[req.staff!.id];
-    if (!currentPassword || !verifyPassword(currentPassword, auth?.passwordHash)) {
-      return res.status(401).json({ error: 'Current password is incorrect.' });
-    }
-    if (!newPassword || newPassword.length < 8) {
-      return res.status(400).json({ error: 'New password must be at least 8 characters.' });
-    }
-    staffAuth[req.staff!.id] = { passwordHash: hashPassword(newPassword), mustChangePassword: false };
-    recordEvent(req.staff!.id, req.staff!.name, 'PASSWORD_CHANGED', 'staff', req.staff!.id, {});
-    res.json({ success: true });
-  });
-
-  // API: Set a new password when mustChangePassword is true (e.g. right
-  // after signing in with a temporary, system-generated password). Doesn't
-  // require the current password — a full username+password+2FA sign-in
-  // already just proved identity — but only works while mustChangePassword
-  // is actually set, so it can't be used to silently reset an established
-  // password without knowing it.
-  app.post('/api/auth/set-initial-password', requireAuth, (req: AuthedRequest, res) => {
-    const auth = staffAuth[req.staff!.id];
-    if (!auth?.mustChangePassword) {
-      return res.status(400).json({ error: 'A password change is not required for this account.' });
-    }
-    const { newPassword } = req.body as { newPassword?: string };
-    if (!newPassword || newPassword.length < 8) {
-      return res.status(400).json({ error: 'New password must be at least 8 characters.' });
-    }
-    staffAuth[req.staff!.id] = { passwordHash: hashPassword(newPassword), mustChangePassword: false };
-    recordEvent(req.staff!.id, req.staff!.name, 'PASSWORD_CHANGED', 'staff', req.staff!.id, {});
     res.json({ success: true });
   });
 
@@ -463,46 +369,20 @@ export function createApiApp(): express.Express {
     res.json({ success: true, message: "If that email matches an account, we've sent a username reminder." });
   });
 
-  // API: Forgot password — same non-revealing shape as forgot-username. A
-  // real deployment would email a reset link containing this token; here
-  // the token itself is the "instructions" delivered by sendEmail (see
-  // notificationDeliveryService's dev-mode console log).
+  // API: Forgot password — same non-revealing shape as forgot-username.
+  // DEMO-ONLY: this build has no self-serve password reset (every password
+  // is a fixed literal in src/seedData.auth.ts) — this endpoint just tells
+  // the requester to contact an administrator, without revealing whether
+  // the email matches an account.
   app.post('/api/auth/forgot-password', async (req, res) => {
     const { email } = req.body as { email?: string };
     if (email) {
       const staffMember = findStaffByEmail(email);
       if (staffMember) {
-        const token = generateResetToken();
-        pendingResets.set(token, { staffId: staffMember.id, expiresAt: Date.now() + RESET_TOKEN_TTL_MS });
-        await sendEmail(
-          staffMember.email,
-          'Reset your CareHomeOS password',
-          `Use this one-time reset token in the app within 30 minutes: ${token}. If you didn't request this, you can ignore this email.`
-        );
         recordEvent(staffMember.id, staffMember.name, 'PASSWORD_RESET_REQUESTED', 'staff', staffMember.id, {});
       }
     }
-    res.json({ success: true, message: "If that email matches an account, we've sent password reset instructions." });
-  });
-
-  // API: Complete a password reset with the token from forgot-password.
-  app.post('/api/auth/reset-password', (req, res) => {
-    const { token, newPassword } = req.body as { token?: string; newPassword?: string };
-    if (!token) return res.status(400).json({ error: 'Reset token is required.' });
-    const pending = pendingResets.get(token);
-    if (!pending || Date.now() > pending.expiresAt) {
-      return res.status(401).json({ error: 'That reset link has expired. Request a new one.' });
-    }
-    if (!newPassword || newPassword.length < 8) {
-      return res.status(400).json({ error: 'New password must be at least 8 characters.' });
-    }
-    staffAuth[pending.staffId] = { passwordHash: hashPassword(newPassword), mustChangePassword: false };
-    pendingResets.delete(token);
-    const staffMember = dbState.staff.find((s) => s.id === pending.staffId);
-    if (staffMember) {
-      recordEvent(staffMember.id, staffMember.name, 'PASSWORD_RESET_COMPLETED', 'staff', staffMember.id, {});
-    }
-    res.json({ success: true });
+    res.json({ success: true, message: "If that email matches an account, an administrator will be in touch with password reset instructions." });
   });
 
   // API: Get Full State (Scoped to current home_id; requires an authenticated session)
