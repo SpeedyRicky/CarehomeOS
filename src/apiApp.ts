@@ -39,6 +39,8 @@ import {
   INITIAL_INCIDENTS,
   INITIAL_AUDIT_EVENTS,
   INITIAL_NOTIFICATIONS,
+  INITIAL_TASK_DEFINITIONS,
+  INITIAL_SHIFT_TASK_TEMPLATES,
 } from './seedData';
 import {
   AuditEvent,
@@ -49,7 +51,24 @@ import {
   Reassessment,
   Resident,
   Prospect,
+  TaskDefinition,
+  ShiftTaskTemplate,
+  ShiftTaskAssignment,
 } from './types';
+import { ensureShiftTasksGenerated } from './shiftTasks';
+import { computeExceptions } from './exceptions';
+
+// Persisted review state for a computed exception, keyed by the exception's
+// deterministic id (see src/exceptions.ts). Exceptions themselves are never
+// stored — they're recomputed fresh from live data on every read — but once
+// a Manager/Owner reviews one, that decision needs to stick across reads.
+export interface ExceptionReview {
+  status: 'acknowledged' | 'resolved';
+  reviewed_by: string;
+  reviewed_by_name: string;
+  reviewed_at: string;
+  corrective_action: string | null;
+}
 
 // In-memory data store mimicking relational Postgres tables. Exported so
 // server.ts (local dev / Cloud Run only) can pass the same live reference
@@ -73,7 +92,13 @@ export let dbState = {
   incidents: [...INITIAL_INCIDENTS],
   auditEvents: [...INITIAL_AUDIT_EVENTS],
   notifications: [...INITIAL_NOTIFICATIONS],
+  taskDefinitions: [...INITIAL_TASK_DEFINITIONS] as TaskDefinition[],
+  shiftTaskTemplates: [...INITIAL_SHIFT_TASK_TEMPLATES] as ShiftTaskTemplate[],
+  shiftTaskAssignments: [] as ShiftTaskAssignment[],
+  exceptionReviews: {} as Record<string, ExceptionReview>,
 };
+
+export type DbState = typeof dbState;
 
 // Helper: Append-only Event Logger. Exported for the same reason as
 // dbState above — server.ts wires this into registerAiRoutes() for local
@@ -423,6 +448,188 @@ export function createApiApp(): express.Express {
     });
 
     res.json({ success: true, reassessment });
+  });
+
+  // ==========================================
+  // SCHEDULING & SHARED SHIFT TASKS
+  // ==========================================
+
+  // API: Task catalog (owner-configurable list of task types that can occur
+  // on a shift, e.g. "Assist with Shower", "Medication Pass").
+  app.get('/api/task-definitions', (req, res) => {
+    res.json({ taskDefinitions: dbState.taskDefinitions });
+  });
+
+  // API: Create or update a task definition. Owner-only — this is the
+  // catalog every home's shift task setup draws from.
+  app.post('/api/task-definitions', (req, res) => {
+    const { actorId, taskDefinition } = req.body as { actorId: string; taskDefinition: TaskDefinition };
+    const actor = dbState.staff.find((s) => s.id === actorId);
+    if (!actor || actor.role !== 'Owner') {
+      return res.status(403).json({ error: 'Only the Owner may edit the task catalog.' });
+    }
+
+    const existingIndex = dbState.taskDefinitions.findIndex((t) => t.id === taskDefinition.id);
+    if (existingIndex >= 0) {
+      dbState.taskDefinitions[existingIndex] = { ...taskDefinition, home_id: dbState.home.id };
+    } else {
+      taskDefinition.id = taskDefinition.id || `task-${Date.now()}`;
+      taskDefinition.home_id = dbState.home.id;
+      dbState.taskDefinitions.push(taskDefinition);
+    }
+
+    recordEvent(actor.id, actor.name, existingIndex >= 0 ? 'TASK_DEFINITION_UPDATED' : 'TASK_DEFINITION_CREATED', 'task_definitions', taskDefinition.id, {
+      name: taskDefinition.name,
+      is_active: taskDefinition.is_active,
+    });
+
+    res.json({ success: true, taskDefinition });
+  });
+
+  // API: Which tasks occur on which shift type — this is the "owner should
+  // be able to adjust tasks" control surface.
+  app.get('/api/shift-task-templates', (req, res) => {
+    res.json({ shiftTaskTemplates: dbState.shiftTaskTemplates });
+  });
+
+  app.post('/api/shift-task-templates', (req, res) => {
+    const { actorId, shiftTaskTemplate } = req.body as { actorId: string; shiftTaskTemplate: ShiftTaskTemplate };
+    const actor = dbState.staff.find((s) => s.id === actorId);
+    if (!actor || actor.role !== 'Owner') {
+      return res.status(403).json({ error: 'Only the Owner may adjust which tasks occur on a shift.' });
+    }
+
+    const existingIndex = dbState.shiftTaskTemplates.findIndex((t) => t.id === shiftTaskTemplate.id);
+    if (existingIndex >= 0) {
+      dbState.shiftTaskTemplates[existingIndex] = { ...shiftTaskTemplate, home_id: dbState.home.id };
+    } else {
+      shiftTaskTemplate.id = shiftTaskTemplate.id || `stt-${Date.now()}`;
+      shiftTaskTemplate.home_id = dbState.home.id;
+      dbState.shiftTaskTemplates.push(shiftTaskTemplate);
+    }
+
+    recordEvent(actor.id, actor.name, existingIndex >= 0 ? 'SHIFT_TASK_TEMPLATE_UPDATED' : 'SHIFT_TASK_TEMPLATE_CREATED', 'shift_task_templates', shiftTaskTemplate.id, {
+      shift_type: shiftTaskTemplate.shift_type,
+      task_definition_id: shiftTaskTemplate.task_definition_id,
+      is_active: shiftTaskTemplate.is_active,
+    });
+
+    res.json({ success: true, shiftTaskTemplate });
+  });
+
+  // API: The shared task board for a given date (defaults to today).
+  // Generates today's task instances on first read of the day, from
+  // whichever staff are actually scheduled — see src/shiftTasks.ts.
+  app.get('/api/shift-tasks', (req, res) => {
+    const date = (req.query.date as string) || new Date().toISOString().split('T')[0];
+    ensureShiftTasksGenerated(dbState, date);
+    const tasks = dbState.shiftTaskAssignments.filter((t) => t.date === date);
+    res.json({ shiftTasks: tasks });
+  });
+
+  // API: Claim an unclaimed task (self-organizing shift duties — whoever
+  // picks it up owns it until completed or skipped).
+  app.post('/api/shift-tasks/:id/claim', (req, res) => {
+    const { staffId, staffName } = req.body as { staffId: string; staffName: string };
+    const task = dbState.shiftTaskAssignments.find((t) => t.id === req.params.id);
+    if (!task) return res.status(404).json({ error: 'Task not found.' });
+    if (task.status !== 'pending') {
+      return res.status(409).json({ error: `This task is already ${task.status}.` });
+    }
+    task.status = 'claimed';
+    task.claimed_by = staffId;
+    task.claimed_by_name = staffName;
+    res.json({ success: true, task });
+  });
+
+  // API: Mark a task complete.
+  app.post('/api/shift-tasks/:id/complete', (req, res) => {
+    const { staffId, staffName, notes } = req.body as { staffId: string; staffName: string; notes?: string };
+    const task = dbState.shiftTaskAssignments.find((t) => t.id === req.params.id);
+    if (!task) return res.status(404).json({ error: 'Task not found.' });
+    if (task.status === 'completed' || task.status === 'skipped') {
+      return res.status(409).json({ error: `This task is already ${task.status}.` });
+    }
+    task.status = 'completed';
+    task.completed_by = staffId;
+    task.completed_by_name = staffName;
+    task.completed_at = new Date().toISOString();
+    task.notes = notes || task.notes;
+
+    recordEvent(staffId, staffName, 'SHIFT_TASK_COMPLETED', 'shift_task_assignments', task.id, {
+      task_name: task.task_name,
+      resident_id: task.resident_id,
+    });
+
+    res.json({ success: true, task });
+  });
+
+  // API: Skip a task with a required reason (feeds the exception if it
+  // shouldn't have been skippable, but keeps the record honest either way).
+  app.post('/api/shift-tasks/:id/skip', (req, res) => {
+    const { staffId, staffName, reason } = req.body as { staffId: string; staffName: string; reason: string };
+    if (!reason || !reason.trim()) {
+      return res.status(400).json({ error: 'A reason is required to skip a task.' });
+    }
+    const task = dbState.shiftTaskAssignments.find((t) => t.id === req.params.id);
+    if (!task) return res.status(404).json({ error: 'Task not found.' });
+    if (task.status === 'completed' || task.status === 'skipped') {
+      return res.status(409).json({ error: `This task is already ${task.status}.` });
+    }
+    task.status = 'skipped';
+    task.completed_by = staffId;
+    task.completed_by_name = staffName;
+    task.completed_at = new Date().toISOString();
+    task.notes = reason.trim();
+
+    recordEvent(staffId, staffName, 'SHIFT_TASK_SKIPPED', 'shift_task_assignments', task.id, {
+      task_name: task.task_name,
+      resident_id: task.resident_id,
+      reason: task.notes,
+    });
+
+    res.json({ success: true, task });
+  });
+
+  // ==========================================
+  // EXCEPTIONS — detected automatically, not hand-filed. See src/exceptions.ts.
+  // ==========================================
+
+  app.get('/api/exceptions', (req, res) => {
+    const date = new Date().toISOString().split('T')[0];
+    ensureShiftTasksGenerated(dbState, date);
+    res.json({ exceptions: computeExceptions(dbState) });
+  });
+
+  // API: Acknowledge or resolve an exception, optionally logging a
+  // corrective action. Manager/Owner only.
+  app.post('/api/exceptions/:id/review', (req, res) => {
+    const { actorId, status, correctiveAction } = req.body as {
+      actorId: string;
+      status: 'acknowledged' | 'resolved';
+      correctiveAction?: string;
+    };
+    const actor = dbState.staff.find((s) => s.id === actorId);
+    if (!actor || (actor.role !== 'Manager' && actor.role !== 'Owner')) {
+      return res.status(403).json({ error: 'Only a Manager or Owner may review an exception.' });
+    }
+    if (status !== 'acknowledged' && status !== 'resolved') {
+      return res.status(400).json({ error: 'status must be "acknowledged" or "resolved".' });
+    }
+
+    dbState.exceptionReviews[req.params.id] = {
+      status,
+      reviewed_by: actor.id,
+      reviewed_by_name: actor.name,
+      reviewed_at: new Date().toISOString(),
+      corrective_action: correctiveAction?.trim() || null,
+    };
+
+    recordEvent(actor.id, actor.name, status === 'resolved' ? 'EXCEPTION_RESOLVED' : 'EXCEPTION_ACKNOWLEDGED', 'exceptions', req.params.id, {
+      corrective_action: correctiveAction || null,
+    });
+
+    res.json({ success: true, exceptions: computeExceptions(dbState) });
   });
 
   return app;
