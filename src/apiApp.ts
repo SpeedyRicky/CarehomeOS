@@ -1,5 +1,5 @@
-// This file is the entire CareHomeOS API — every /api/* route, all in-memory
-// state, auth, and integrations — with zero dependency on Vite, dev-server
+// This file is the entire CareHomeOS API — every non-AI /api/* route and
+// all in-memory state — with zero dependency on Vite, dev-server
 // middleware, or static-file serving. That separation is deliberate and
 // load-bearing: api/index.ts (Vercel's serverless entry point) imports
 // createApiApp() from here directly, so the Vercel function's dependency
@@ -12,8 +12,15 @@
 // process — that all belongs in server.ts's startServer(), which wraps
 // this file's createApiApp() for local dev and traditional Node hosts
 // (Cloud Run, a VM, etc.).
+//
+// There is no authentication layer here — every route is open, matching
+// the original prototype. Identity in this demo is established entirely
+// client-side by LoginView.tsx's hardcoded credential check; the server
+// trusts whatever staff id the client sends, same as before any of that
+// existed. Do not add real access control on top of this without also
+// adding real server-side session verification — a client-side login
+// screen alone proves nothing to this server.
 import express from 'express';
-import dotenv from 'dotenv';
 import {
   INITIAL_ORGANIZATION,
   INITIAL_HOME,
@@ -32,13 +39,7 @@ import {
   INITIAL_INCIDENTS,
   INITIAL_AUDIT_EVENTS,
   INITIAL_NOTIFICATIONS,
-  INITIAL_SHIFT_TEMPLATES,
-  INITIAL_TIME_ENTRIES,
-  INITIAL_SHIFT_CHANGE_REQUESTS,
 } from './seedData';
-import { SEED_PASSWORD_HASHES, SEED_MFA_DEMO_CODE } from './seedData.auth';
-import { verifyPassword, createSessionToken, verifySessionToken } from './lib/auth';
-import { syncTimeEntryToQuickBooksTime, verifyQuickBooksWebhookSignature } from './services/quickbooksTimeService';
 import {
   AuditEvent,
   IncidentReport,
@@ -48,24 +49,7 @@ import {
   Reassessment,
   Resident,
   Prospect,
-  Staff,
-  TimeEntry,
-  TimeEntryType,
-  ShiftTemplate,
-  ShiftChangeRequest,
-  ShiftChangeRequestType,
 } from './types';
-
-dotenv.config();
-
-// Session signing secret. MUST be overridden via env in any real deployment —
-// see SECURITY.md "Secrets Management". The fallback exists only so the
-// prototype boots without configuration; it is intentionally obvious so it's
-// never mistaken for a real secret.
-const SESSION_SECRET = process.env.SESSION_SECRET || 'INSECURE-DEV-ONLY-SESSION-SECRET-CHANGE-ME';
-if (!process.env.SESSION_SECRET) {
-  console.warn('[SECURITY] SESSION_SECRET is not set. Using an insecure development default — set SESSION_SECRET before deploying.');
-}
 
 // In-memory data store mimicking relational Postgres tables. Exported so
 // server.ts (local dev / Cloud Run only) can pass the same live reference
@@ -78,9 +62,6 @@ export let dbState = {
   staff: [...INITIAL_STAFF],
   shifts: [...INITIAL_SHIFTS],
   shiftAssignments: [...INITIAL_SHIFT_ASSIGNMENTS],
-  shiftTemplates: [...INITIAL_SHIFT_TEMPLATES],
-  timeEntries: [...INITIAL_TIME_ENTRIES],
-  shiftChangeRequests: [...INITIAL_SHIFT_CHANGE_REQUESTS],
   prospects: [...INITIAL_PROSPECTS],
   residents: [...INITIAL_RESIDENTS],
   carePlans: [...INITIAL_CARE_PLANS],
@@ -121,130 +102,19 @@ export function recordEvent(
   return event;
 }
 
-// ==========================================
-// AUTHENTICATION & AUTHORIZATION
-// See SECURITY.md for the full design (password hashing, session tokens,
-// MFA, rate limiting) and its production hardening checklist.
-// ==========================================
-
-export interface AuthedRequest extends express.Request {
-  staff?: Staff;
-}
-
-function getBearerToken(req: express.Request): string | undefined {
-  const header = req.headers.authorization;
-  if (!header?.startsWith('Bearer ')) return undefined;
-  return header.slice('Bearer '.length);
-}
-
-export function requireAuth(req: AuthedRequest, res: express.Response, next: express.NextFunction) {
-  const token = getBearerToken(req);
-  const payload = verifySessionToken(token, SESSION_SECRET);
-  if (!payload) {
-    return res.status(401).json({ error: 'Authentication required. Please sign in.' });
-  }
-  const staffMember = dbState.staff.find((s) => s.id === payload.staffId);
-  if (!staffMember) {
-    return res.status(401).json({ error: 'Session is no longer valid. Please sign in again.' });
-  }
-  req.staff = staffMember;
-  next();
-}
-
-function requireRole(...roles: Array<Staff['role']>) {
-  return (req: AuthedRequest, res: express.Response, next: express.NextFunction) => {
-    if (!req.staff || !roles.includes(req.staff.role)) {
-      return res.status(403).json({ error: `This action requires one of the following roles: ${roles.join(', ')}.` });
-    }
-    next();
-  };
-}
-
-// Role tiers, low to high: Care Worker -> Supervisor -> Manager -> Owner.
-// Supervisor is a shift-lead tier: full review/approval authority (incident
-// review, reassessments, shift-change approvals, time entry corrections)
-// but not the business-admin tier (CRM pipeline, compliance dashboard,
-// shift template management, QuickBooks Time sync) reserved for
-// Manager/Owner.
-const REVIEW_TIER_ROLES: Array<Staff['role']> = ['Supervisor', 'Manager', 'Owner'];
-const BUSINESS_ADMIN_ROLES: Array<Staff['role']> = ['Manager', 'Owner'];
-
-function isReviewTier(role: Staff['role']): boolean {
-  return REVIEW_TIER_ROLES.includes(role);
-}
-
 /**
- * Rejects requests where the body claims to act as a different staff member
- * than the authenticated session. Closes the identity-spoofing hole in the
- * original prototype, where every mutating endpoint trusted a client-supplied
- * staff id at face value.
- */
-function requireSelf(req: AuthedRequest, res: express.Response, claimedStaffId: string | undefined): boolean {
-  if (claimedStaffId && req.staff && claimedStaffId !== req.staff.id) {
-    res.status(403).json({ error: 'You may not perform this action on behalf of another staff member.' });
-    return false;
-  }
-  return true;
-}
-
-// ==========================================
-// TIME ENTRIES (append-only punch ledger, separate from the shift_assignment
-// "current status" projection) + QuickBooks Time sync
-// ==========================================
-
-async function recordTimeEntry(
-  staffId: string,
-  shiftAssignmentId: string | null,
-  entryType: TimeEntryType,
-  source: TimeEntry['source'] = 'app'
-): Promise<TimeEntry> {
-  const entry: TimeEntry = {
-    id: `time-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
-    home_id: dbState.home.id,
-    staff_id: staffId,
-    shift_assignment_id: shiftAssignmentId,
-    entry_type: entryType,
-    timestamp: new Date().toISOString(),
-    source,
-    is_corrected: false,
-    corrected_by: null,
-    correction_reason: null,
-    qbo_synced: false,
-    qbo_sync_id: null,
-    qbo_sync_error: null,
-  };
-  dbState.timeEntries.unshift(entry);
-
-  const syncResult = await syncTimeEntryToQuickBooksTime(entry);
-  entry.qbo_synced = syncResult.success;
-  entry.qbo_sync_id = syncResult.qboId || null;
-  entry.qbo_sync_error = syncResult.error || null;
-
-  return entry;
-}
-
-/**
- * Builds the Express app containing every `/api/*` route. See the file
- * header above for why this lives in its own module: api/index.ts (Vercel)
- * imports this function directly, and server.ts's startServer() (local
- * dev / Cloud Run) wraps it with dev/prod frontend serving and
+ * Builds the Express app containing every non-AI `/api/*` route. See the
+ * file header above for why this lives in its own module: api/index.ts
+ * (Vercel) imports this function directly, and server.ts's startServer()
+ * (local dev / Cloud Run) wraps it with dev/prod frontend serving and
  * `app.listen()`.
  */
 export function createApiApp(): express.Express {
   const app = express();
 
-  // Capture the raw request body alongside the parsed JSON so webhook
-  // handlers (e.g. QuickBooks Time) can verify an HMAC signature against the
-  // exact bytes Intuit signed, not a re-serialized copy.
-  app.use(
-    express.json({
-      verify: (req: express.Request & { rawBody?: string }, _res, buf) => {
-        req.rawBody = buf.toString('utf-8');
-      },
-    })
-  );
+  app.use(express.json());
 
-  // API: Health check (no auth — carries no PHI)
+  // API: Health check
   app.get('/api/health', (req, res) => {
     res.json({
       status: 'ok',
@@ -254,71 +124,14 @@ export function createApiApp(): express.Express {
     });
   });
 
-  // ==========================================
-  // AUTHENTICATION
-  // ==========================================
-
-  // API: Login (email + password, MFA code required on the second step for
-  // any account with mfa_enabled). See SECURITY.md for the full flow and its
-  // production hardening checklist (rate limiting/lockout, real MFA/TOTP
-  // provider, httpOnly cookie transport).
-  app.post('/api/auth/login', async (req, res) => {
-    const { email, password, mfaCode } = req.body as { email?: string; password?: string; mfaCode?: string };
-
-    if (!email || !password) {
-      return res.status(400).json({ error: 'Email and password are required.' });
-    }
-
-    const staffMember = dbState.staff.find((s) => s.email.toLowerCase() === email.toLowerCase());
-    const passwordHash = staffMember ? SEED_PASSWORD_HASHES[staffMember.id] : undefined;
-
-    // Constant-shape response whether the email doesn't exist or the
-    // password is wrong — never reveal which one failed.
-    if (!staffMember || !verifyPassword(password, passwordHash)) {
-      recordEvent('anonymous', email, 'LOGIN_FAILED', 'staff', staffMember?.id || 'unknown', { reason: 'invalid_credentials' });
-      return res.status(401).json({ error: 'Invalid email or password.' });
-    }
-
-    if (staffMember.mfa_enabled) {
-      if (!mfaCode) {
-        return res.status(401).json({ mfaRequired: true, error: 'Enter the 6-digit verification code for your account.' });
-      }
-      if (mfaCode !== SEED_MFA_DEMO_CODE) {
-        recordEvent(staffMember.id, staffMember.name, 'LOGIN_FAILED', 'staff', staffMember.id, { reason: 'invalid_mfa_code' });
-        return res.status(401).json({ mfaRequired: true, error: 'Incorrect verification code.' });
-      }
-    }
-
-    const token = createSessionToken(
-      { staffId: staffMember.id, role: staffMember.role, homeId: staffMember.home_id },
-      SESSION_SECRET
-    );
-
-    recordEvent(staffMember.id, staffMember.name, 'LOGIN_SUCCESS', 'staff', staffMember.id, {});
-    res.json({ success: true, token, staff: staffMember });
-  });
-
-  // API: Resolve the current session
-  app.get('/api/auth/me', requireAuth, (req: AuthedRequest, res) => {
-    res.json({ staff: req.staff });
-  });
-
-  // API: Logout (primarily client-side token discard; recorded for audit)
-  app.post('/api/auth/logout', requireAuth, (req: AuthedRequest, res) => {
-    recordEvent(req.staff!.id, req.staff!.name, 'LOGOUT', 'staff', req.staff!.id, {});
-    res.json({ success: true });
-  });
-
-  // API: Get Full State (Scoped to current home_id; requires an authenticated session)
-  app.get('/api/state', requireAuth, (req, res) => {
+  // API: Get Full State (Scoped to current home_id)
+  app.get('/api/state', (req, res) => {
     res.json(dbState);
   });
 
   // API: Clock In / Clock Out
-  app.post('/api/shifts/clock', requireAuth, async (req: AuthedRequest, res) => {
+  app.post('/api/shifts/clock', (req, res) => {
     const { staffId, shiftId, action } = req.body;
-    if (!requireSelf(req, res, staffId)) return;
-
     const staffMember = dbState.staff.find((s) => s.id === staffId);
     if (!staffMember) {
       return res.status(404).json({ error: 'Staff member not found' });
@@ -345,26 +158,27 @@ export function createApiApp(): express.Express {
         shift_id: assignment.shift_id,
         clocked_in_at: assignment.clocked_in_at,
       });
-      const timeEntry = await recordTimeEntry(staffId, assignment.id, 'clock_in');
-      return res.json({ success: true, assignment, timeEntry });
+      return res.json({ success: true, assignment });
     } else {
-      let timeEntry: TimeEntry | undefined;
       if (assignment) {
         assignment.clocked_out_at = new Date().toISOString();
         assignment.is_active = false;
         recordEvent(staffId, staffMember.name, 'CLOCK_OUT', 'shift_assignments', assignment.id, {
           clocked_out_at: assignment.clocked_out_at,
         });
-        timeEntry = await recordTimeEntry(staffId, assignment.id, 'clock_out');
       }
-      return res.json({ success: true, assignment, timeEntry });
+      return res.json({ success: true, assignment });
     }
   });
 
   // API: Convert Prospect to Resident (Lifecycle Spine)
-  app.post('/api/prospects/convert', requireAuth, requireRole(...BUSINESS_ADMIN_ROLES), (req: AuthedRequest, res) => {
+  app.post('/api/prospects/convert', (req, res) => {
     const { prospectId, roomNumber, levelOfCare, actorId, actorName } = req.body;
-    if (!requireSelf(req, res, actorId)) return;
+
+    const actor = dbState.staff.find((s) => s.id === actorId);
+    if (actor && actor.role === 'Care Worker') {
+      return res.status(403).json({ error: 'Access restricted: Care workers are not permitted to manage CRM prospects or resident admissions.' });
+    }
 
     const prospect = dbState.prospects.find((p) => p.id === prospectId);
     if (!prospect) {
@@ -412,7 +226,7 @@ export function createApiApp(): express.Express {
     };
     dbState.reassessments.unshift(newReassessment);
 
-    recordEvent(req.staff!.id, req.staff!.name, 'PROSPECT_CONVERTED', 'residents', newResident.id, {
+    recordEvent(actorId || 'staff-olatundun', actorName || 'Manager', 'PROSPECT_CONVERTED', 'residents', newResident.id, {
       prospect_id: prospect.id,
       resident_name: newResident.full_name,
       room: newResident.room_number,
@@ -422,9 +236,8 @@ export function createApiApp(): express.Express {
   });
 
   // API: eMAR Administer Medication
-  app.post('/api/emar/administer', requireAuth, (req: AuthedRequest, res) => {
+  app.post('/api/emar/administer', (req, res) => {
     const { orderId, residentId, shiftId, administeredBy, administeredByName, doseGiven, status, notes, scheduledTime } = req.body;
-    if (!requireSelf(req, res, administeredBy)) return;
 
     const administration: MedicationAdministration = {
       id: `med-adm-${Date.now()}`,
@@ -455,9 +268,8 @@ export function createApiApp(): express.Express {
   });
 
   // API: Daily Report Submit / Update
-  app.post('/api/daily-reports', requireAuth, (req: AuthedRequest, res) => {
+  app.post('/api/daily-reports', (req, res) => {
     const reportData: DailyReport = req.body;
-    if (!requireSelf(req, res, reportData.authored_by)) return;
     const existingIndex = dbState.dailyReports.findIndex(
       (r) => r.resident_id === reportData.resident_id && r.date === reportData.date
     );
@@ -484,9 +296,8 @@ export function createApiApp(): express.Express {
   });
 
   // API: Shift Checklist (Medication Storage Secured - NL AG Finding)
-  app.post('/api/shift-checklists', requireAuth, (req: AuthedRequest, res) => {
+  app.post('/api/shift-checklists', (req, res) => {
     const checklist: ShiftChecklist = req.body;
-    if (!requireSelf(req, res, checklist.completed_by)) return;
     dbState.shiftChecklists.unshift(checklist);
 
     recordEvent(checklist.completed_by, checklist.completed_by_name, 'SHIFT_CHECKLIST_COMPLETED', 'shift_checklists', checklist.id, {
@@ -499,9 +310,8 @@ export function createApiApp(): express.Express {
   });
 
   // API: Incident Submit (Draft -> Submitted)
-  app.post('/api/incidents/submit', requireAuth, (req: AuthedRequest, res) => {
+  app.post('/api/incidents/submit', (req, res) => {
     const incidentData: IncidentReport = req.body;
-    if (!requireSelf(req, res, incidentData.reported_by)) return;
     const existingIndex = dbState.incidents.findIndex((i) => i.id === incidentData.id);
 
     if (existingIndex >= 0) {
@@ -536,13 +346,17 @@ export function createApiApp(): express.Express {
   });
 
   // API: Incident Review (Approve / Reject) with SEGREGATION OF DUTIES
-  app.post('/api/incidents/review', requireAuth, requireRole(...REVIEW_TIER_ROLES), (req: AuthedRequest, res) => {
+  app.post('/api/incidents/review', (req, res) => {
     const { incidentId, reviewerId, reviewerName, reviewerRole, action, rejectionReason } = req.body;
-    if (!requireSelf(req, res, reviewerId)) return;
 
     const incident = dbState.incidents.find((i) => i.id === incidentId);
     if (!incident) {
       return res.status(404).json({ error: 'Incident not found' });
+    }
+
+    // Role check: Only Owner or Manager
+    if (reviewerRole !== 'Manager' && reviewerRole !== 'Owner') {
+      return res.status(403).json({ error: 'Only Manager or Owner roles can review incident reports.' });
     }
 
     // Segregation of duties check: Reviewer CANNOT be the author!
@@ -584,9 +398,13 @@ export function createApiApp(): express.Express {
   });
 
   // API: Complete Reassessment (NL AG finding backlog clearance)
-  app.post('/api/reassessments/complete', requireAuth, requireRole(...REVIEW_TIER_ROLES), (req: AuthedRequest, res) => {
+  app.post('/api/reassessments/complete', (req, res) => {
     const { reassessmentId, completedBy, outcomeNotes, newCarePlanCreated } = req.body;
-    if (!requireSelf(req, res, completedBy)) return;
+
+    const actor = dbState.staff.find((s) => s.id === completedBy);
+    if (actor && actor.role === 'Care Worker') {
+      return res.status(403).json({ error: 'Access restricted: Care workers are not permitted to conduct or complete statutory reassessments.' });
+    }
 
     const reassessment = dbState.reassessments.find((r) => r.id === reassessmentId);
     if (!reassessment) {
@@ -607,248 +425,6 @@ export function createApiApp(): express.Express {
     res.json({ success: true, reassessment });
   });
 
-  // ==========================================
-  // SCHEDULING: time_entries, shift_templates, shift_change_requests
-  // ==========================================
-
-  // API: List time entries (own entries for Care Workers; full roster for
-  // Supervisor/Manager/Owner) — the append-only punch ledger behind
-  // payroll/QuickBooks Time sync.
-  app.get('/api/time-entries', requireAuth, (req: AuthedRequest, res) => {
-    const isManager = isReviewTier(req.staff!.role);
-    const entries = isManager
-      ? dbState.timeEntries
-      : dbState.timeEntries.filter((t) => t.staff_id === req.staff!.id);
-    res.json({ timeEntries: entries });
-  });
-
-  // API: Record a time entry punch. Staff may only punch for themselves;
-  // recording a punch on someone else's behalf is a correction and is
-  // restricted to Supervisor/Manager/Owner with a mandatory reason.
-  app.post('/api/time-entries', requireAuth, async (req: AuthedRequest, res) => {
-    const { staffId, shiftAssignmentId, entryType, correctionReason } = req.body as {
-      staffId: string;
-      shiftAssignmentId: string | null;
-      entryType: TimeEntryType;
-      correctionReason?: string;
-    };
-
-    const isOwnEntry = staffId === req.staff!.id;
-    const isManager = isReviewTier(req.staff!.role);
-
-    if (!isOwnEntry && !isManager) {
-      return res.status(403).json({ error: 'Only a Supervisor, Manager, or Owner may record a time entry correction for another staff member.' });
-    }
-    if (!isOwnEntry && (!correctionReason || !correctionReason.trim())) {
-      return res.status(400).json({ error: 'A correction reason is required when recording a time entry for another staff member.' });
-    }
-
-    const targetStaff = dbState.staff.find((s) => s.id === staffId);
-    if (!targetStaff) {
-      return res.status(404).json({ error: 'Staff member not found' });
-    }
-
-    const entry: TimeEntry = {
-      id: `time-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
-      home_id: dbState.home.id,
-      staff_id: staffId,
-      shift_assignment_id: shiftAssignmentId || null,
-      entry_type: entryType,
-      timestamp: new Date().toISOString(),
-      source: isOwnEntry ? 'app' : 'manual_correction',
-      is_corrected: !isOwnEntry,
-      corrected_by: isOwnEntry ? null : req.staff!.id,
-      correction_reason: isOwnEntry ? null : correctionReason!.trim(),
-      qbo_synced: false,
-      qbo_sync_id: null,
-      qbo_sync_error: null,
-    };
-    dbState.timeEntries.unshift(entry);
-
-    const syncResult = await syncTimeEntryToQuickBooksTime(entry);
-    entry.qbo_synced = syncResult.success;
-    entry.qbo_sync_id = syncResult.qboId || null;
-    entry.qbo_sync_error = syncResult.error || null;
-
-    recordEvent(req.staff!.id, req.staff!.name, isOwnEntry ? 'TIME_ENTRY_RECORDED' : 'TIME_ENTRY_CORRECTED', 'time_entries', entry.id, {
-      staff_id: staffId,
-      entry_type: entryType,
-      correction_reason: entry.correction_reason,
-    });
-
-    res.json({ success: true, timeEntry: entry });
-  });
-
-  // API: List shift templates (reference data — visible to all authenticated staff)
-  app.get('/api/shift-templates', requireAuth, (req, res) => {
-    res.json({ shiftTemplates: dbState.shiftTemplates });
-  });
-
-  // API: Create or update a shift template (Manager/Owner only)
-  app.post('/api/shift-templates', requireAuth, requireRole(...BUSINESS_ADMIN_ROLES), (req: AuthedRequest, res) => {
-    const templateData: ShiftTemplate = req.body;
-    const existingIndex = dbState.shiftTemplates.findIndex((t) => t.id === templateData.id);
-
-    if (existingIndex >= 0) {
-      dbState.shiftTemplates[existingIndex] = { ...templateData };
-    } else {
-      templateData.id = templateData.id || `template-${Date.now()}`;
-      templateData.home_id = dbState.home.id;
-      dbState.shiftTemplates.unshift(templateData);
-    }
-
-    recordEvent(req.staff!.id, req.staff!.name, existingIndex >= 0 ? 'SHIFT_TEMPLATE_UPDATED' : 'SHIFT_TEMPLATE_CREATED', 'shift_templates', templateData.id, {
-      name: templateData.name,
-    });
-
-    res.json({ success: true, shiftTemplate: templateData });
-  });
-
-  // API: List shift change requests (own requests for Care Workers; all
-  // pending + own for Supervisor/Manager/Owner so approvals are visible)
-  app.get('/api/shift-change-requests', requireAuth, (req: AuthedRequest, res) => {
-    const isManager = isReviewTier(req.staff!.role);
-    const requests = isManager
-      ? dbState.shiftChangeRequests
-      : dbState.shiftChangeRequests.filter((r) => r.requested_by === req.staff!.id);
-    res.json({ shiftChangeRequests: requests });
-  });
-
-  // API: Submit a shift change request (swap / cover / time off). A worker
-  // may only request a change against their own shift assignment.
-  app.post('/api/shift-change-requests', requireAuth, (req: AuthedRequest, res) => {
-    const { shiftAssignmentId, requestType, targetStaffId, reason } = req.body as {
-      shiftAssignmentId: string;
-      requestType: ShiftChangeRequestType;
-      targetStaffId: string | null;
-      reason: string;
-    };
-
-    const assignment = dbState.shiftAssignments.find((a) => a.id === shiftAssignmentId);
-    if (!assignment) {
-      return res.status(404).json({ error: 'Shift assignment not found.' });
-    }
-    if (assignment.staff_id !== req.staff!.id) {
-      return res.status(403).json({ error: 'You may only request a change against your own shift.' });
-    }
-    if (!reason || !reason.trim()) {
-      return res.status(400).json({ error: 'A reason is required.' });
-    }
-
-    const targetStaff = targetStaffId ? dbState.staff.find((s) => s.id === targetStaffId) : undefined;
-
-    const request: ShiftChangeRequest = {
-      id: `change-req-${Date.now()}`,
-      home_id: dbState.home.id,
-      shift_assignment_id: shiftAssignmentId,
-      requested_by: req.staff!.id,
-      requested_by_name: req.staff!.name,
-      request_type: requestType,
-      target_staff_id: targetStaff?.id || null,
-      target_staff_name: targetStaff?.name || null,
-      reason: reason.trim(),
-      status: 'pending',
-      reviewed_by: null,
-      reviewed_by_name: null,
-      reviewed_at: null,
-      review_notes: null,
-      created_at: new Date().toISOString(),
-    };
-    dbState.shiftChangeRequests.unshift(request);
-
-    recordEvent(req.staff!.id, req.staff!.name, 'SHIFT_CHANGE_REQUESTED', 'shift_change_requests', request.id, {
-      request_type: requestType,
-      shift_assignment_id: shiftAssignmentId,
-      target_staff_id: request.target_staff_id,
-    });
-
-    res.json({ success: true, request });
-  });
-
-  // API: Review a shift change request — Manager/Owner only, with
-  // segregation of duties (a manager cannot approve their own request).
-  app.post('/api/shift-change-requests/:id/review', requireAuth, requireRole(...REVIEW_TIER_ROLES), (req: AuthedRequest, res) => {
-    const { action, reviewNotes } = req.body as { action: 'approve' | 'deny'; reviewNotes?: string };
-    const request = dbState.shiftChangeRequests.find((r) => r.id === req.params.id);
-
-    if (!request) {
-      return res.status(404).json({ error: 'Shift change request not found.' });
-    }
-    if (request.requested_by === req.staff!.id) {
-      return res.status(403).json({
-        error: 'Segregation of duties violation: you cannot approve or deny your own shift change request.',
-      });
-    }
-    if (request.status !== 'pending') {
-      return res.status(409).json({ error: `This request has already been ${request.status}.` });
-    }
-
-    request.status = action === 'approve' ? 'approved' : 'denied';
-    request.reviewed_by = req.staff!.id;
-    request.reviewed_by_name = req.staff!.name;
-    request.reviewed_at = new Date().toISOString();
-    request.review_notes = reviewNotes?.trim() || null;
-
-    // A swap/cover approval reassigns the underlying shift to the target
-    // staff member. Time off approvals leave the assignment for the
-    // manager to re-staff separately.
-    if (action === 'approve' && request.target_staff_id && (request.request_type === 'swap' || request.request_type === 'cover')) {
-      const assignment = dbState.shiftAssignments.find((a) => a.id === request.shift_assignment_id);
-      if (assignment) {
-        assignment.staff_id = request.target_staff_id;
-      }
-    }
-
-    recordEvent(req.staff!.id, req.staff!.name, action === 'approve' ? 'SHIFT_CHANGE_APPROVED' : 'SHIFT_CHANGE_DENIED', 'shift_change_requests', request.id, {
-      review_notes: request.review_notes,
-    });
-
-    res.json({ success: true, request });
-  });
-
-  // ==========================================
-  // QUICKBOOKS TIME INTEGRATION
-  // ==========================================
-
-  // API: Manually trigger a sync pass over unsynced time entries
-  // (Manager/Owner only). A production deployment would run this on a
-  // schedule instead of on demand.
-  app.post('/api/integrations/quickbooks-time/sync', requireAuth, requireRole(...BUSINESS_ADMIN_ROLES), async (req: AuthedRequest, res) => {
-    const unsynced = dbState.timeEntries.filter((t) => !t.qbo_synced);
-    let syncedCount = 0;
-
-    for (const entry of unsynced) {
-      const result = await syncTimeEntryToQuickBooksTime(entry);
-      entry.qbo_synced = result.success;
-      entry.qbo_sync_id = result.qboId || null;
-      entry.qbo_sync_error = result.error || null;
-      if (result.success) syncedCount += 1;
-    }
-
-    recordEvent(req.staff!.id, req.staff!.name, 'QUICKBOOKS_TIME_SYNC_TRIGGERED', 'time_entries', 'bulk', {
-      attempted: unsynced.length,
-      synced: syncedCount,
-    });
-
-    res.json({ success: true, attempted: unsynced.length, synced: syncedCount });
-  });
-
-  // API: Inbound QuickBooks Time webhook. Verified via HMAC signature — see
-  // src/services/quickbooksTimeService.ts. No session auth applies here;
-  // trust is established entirely by the signature check.
-  app.post('/api/integrations/quickbooks-time/webhook', (req: express.Request & { rawBody?: string }, res) => {
-    const signature = req.headers['x-qbtime-signature'] as string | undefined;
-    if (!verifyQuickBooksWebhookSignature(req.rawBody || '', signature)) {
-      return res.status(401).json({ error: 'Invalid webhook signature.' });
-    }
-
-    // TODO(go-live): map the verified payload to time entry sync-status
-    // updates once this organization's QuickBooks Time webhook schema is
-    // finalized.
-    recordEvent('system-quickbooks-time', 'QuickBooks Time', 'QUICKBOOKS_WEBHOOK_RECEIVED', 'integration_events', 'qbo-webhook', {});
-    res.json({ received: true });
-  });
-
   return app;
 }
 
@@ -857,10 +433,9 @@ export function createApiApp(): express.Express {
  * synchronous throw in a route handler, or an explicit next(err) call)
  * into a clean JSON 500 instead of Express's default HTML error page.
  * That distinction matters concretely here — the client always does
- * `await res.json()` on the response (see src/App.tsx / LoginView.tsx),
- * and parsing an HTML error page throws a SyntaxError that surfaces as a
- * generic "Could not reach the server" message, hiding the real failure
- * exactly as happened during the Vercel deployment issues above.
+ * `await res.json()` on the response, and parsing an HTML error page
+ * throws a SyntaxError that surfaces as a generic "Could not reach the
+ * server" message, hiding the real failure.
  *
  * A separate function rather than something createApiApp() registers
  * itself, because Express identifies error-handling middleware by arity

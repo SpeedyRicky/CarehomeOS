@@ -1,7 +1,7 @@
 // AI features (shift handover briefs, compliance audit narratives, the
 // natural-language explainer) live in their OWN file, deployed as their
 // OWN separate Vercel function (api/ai.ts) — deliberately never imported
-// by src/apiApp.ts or api/index.ts (the core login/CRUD function).
+// by src/apiApp.ts or api/index.ts (the core CRUD function).
 //
 // Why: `@google/genai` pulls in a large dependency tree (google-auth-library,
 // protobufjs, ws — over 300 files once fully traced). Vercel's function
@@ -12,7 +12,7 @@
 // import path. There is no reliable way to reference this package from a
 // file and keep it out of that file's deployed bundle; the only reliable
 // isolation is a genuinely separate entry point. Login and every other
-// non-AI endpoint were repeatedly failing in production (crashing before
+// core endpoint were repeatedly failing in production (crashing before
 // even our own error handling could run) because they lived in the same
 // function as this dependency — see git history on this file's
 // introduction for the full incident.
@@ -21,9 +21,8 @@
 // to mount these same routes onto the main app there, sharing the same
 // live dbState — so local/Cloud Run behavior (AI summaries reflecting
 // same-process writes) is unchanged. On Vercel, api/ai.ts calls this with
-// its own independently-seeded state, same as every other cross-function
-// consideration already documented in ARCHITECTURE.md's "Prototype ->
-// Production" section.
+// its own independently-seeded state instead, since separate serverless
+// functions don't share memory.
 import type express from 'express';
 import type { GoogleGenAI } from '@google/genai';
 
@@ -40,22 +39,6 @@ export interface AiRouteContext {
     staff: any[];
     shiftAssignments: any[];
   };
-  requireAuth: express.RequestHandler;
-}
-
-// ==========================================
-// PHIA DATA MINIMIZATION FOR THIRD-PARTY AI CALLS
-// Newfoundland & Labrador's Personal Health Information Act requires
-// disclosing only the minimum personal health information necessary. Google
-// Gemini is a third-party processor with no signed data-processing agreement
-// for this deployment, so no resident's legal name (or any identifier that
-// embeds it) is allowed to reach the outbound prompt — only a room-based
-// alias. Local fallback text (never leaves this process) may keep real
-// names. See SECURITY.md "AI Processing & PHIA".
-// ==========================================
-
-function residentAlias(resident: { room_number: string } | undefined | null): string {
-  return resident ? `Resident-Rm${resident.room_number}` : 'Resident-Unknown';
 }
 
 // Lazy Gemini AI Client initialization. `@google/genai` pulls in a sizeable
@@ -80,23 +63,6 @@ async function getAIClient() {
 }
 
 export function registerAiRoutes(app: express.Express, ctx: AiRouteContext): void {
-  const residentAliasById = (residentId: string): string =>
-    residentAlias(ctx.dbState.residents.find((r: any) => r.id === residentId));
-
-  /** Strips any known resident's full name (or name parts) out of free text before it can reach an outbound AI prompt. */
-  function redactKnownResidentNames(text: string): string {
-    let redacted = text;
-    for (const resident of ctx.dbState.residents) {
-      const alias = residentAlias(resident);
-      const nameParts = [resident.full_name, ...resident.full_name.split(' ').filter((p: string) => p.length > 2)];
-      for (const part of nameParts) {
-        const escaped = part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-        redacted = redacted.replace(new RegExp(escaped, 'gi'), alias);
-      }
-    }
-    return redacted;
-  }
-
   // ==========================================
   // AI LAYER (READ-ONLY SUMMARIZATION & QA)
   // No write path to Postgres/DB. Constrained audit-safe read views.
@@ -142,7 +108,7 @@ export function registerAiRoutes(app: express.Express, ctx: AiRouteContext): voi
   }
 
   // AI 1: Shift Handover Summary
-  app.post('/api/ai/shift-handover', ctx.requireAuth, async (req, res) => {
+  app.post('/api/ai/shift-handover', async (req, res) => {
     try {
       const { shiftType } = req.body;
 
@@ -153,12 +119,6 @@ export function registerAiRoutes(app: express.Express, ctx: AiRouteContext): voi
       const recentIncidents = ctx.dbState.incidents.slice(0, 5);
       const latestChecklist = ctx.dbState.shiftChecklists[0];
 
-      // PHIA data minimization: no resident legal name (or an identifier
-      // that embeds one, like this app's `res-firstname-lastname` ids) may
-      // reach the outbound Gemini prompt — see redactKnownResidentNames()
-      // and residentAliasById() above, and SECURITY.md "AI Processing &
-      // PHIA". Free-text fields are passed through the name scrubber too,
-      // since staff sometimes write a resident's name directly into notes.
       const promptContext = `
 You are the CareHomeOS Clinical Handover AI assistant for small care homes (Hi Haven Manor, CA-NL).
 Generate a concise, high-priority shift handover brief for incoming staff.
@@ -170,10 +130,10 @@ Total Active Residents: ${activeResidents.length}
 Today's Daily Reports Completed: ${todayReports.length}
 Medication Administrations Logged: ${medPasses.length}
 Recent Incidents:
-${recentIncidents.map((i) => `- [${i.severity}] ${i.incident_type}: ${redactKnownResidentNames(i.description)} (Status: ${i.status})`).join('\n')}
+${recentIncidents.map((i) => `- [${i.severity}] ${i.incident_type}: ${i.description} (Status: ${i.status})`).join('\n')}
 Medication Storage Secured Attestation: ${latestChecklist ? (latestChecklist.medication_storage_secured ? 'VERIFIED LOCKED' : 'UNLOCKED / EXCEPTION') : 'PENDING'}
 Resident Daily Notes:
-${todayReports.map((r) => `- ${residentAliasById(r.resident_id)}: Meals: Breakfast(${r.meals.breakfast.eaten}), Lunch(${r.meals.lunch.eaten}). Shower: ${r.shower_taken ? 'Yes' : 'No'}. Obs: ${redactKnownResidentNames(r.general_observations)}`).join('\n')}
+${todayReports.map((r) => `- Resident ${r.resident_id}: Meals: Breakfast(${r.meals.breakfast.eaten}), Lunch(${r.meals.lunch.eaten}). Shower: ${r.shower_taken ? 'Yes' : 'No'}. Obs: ${r.general_observations}`).join('\n')}
 
 Format as:
 1. Critical Highlights & Urgent Alerts
@@ -253,11 +213,11 @@ ${
   });
 
   // AI 2: Compliance & Regulatory Audit Assistant
-  app.post('/api/ai/compliance-audit', ctx.requireAuth, async (req, res) => {
+  app.post('/api/ai/compliance-audit', async (req, res) => {
     try {
       const overdueReassessments = ctx.dbState.reassessments.filter((r) => r.status === 'overdue');
       const unapprovedIncidents = ctx.dbState.incidents.filter((i) => i.status === 'submitted');
-      const expiringStaff = ctx.dbState.staff.filter((s) => s.credentials.some((c) => c.status === 'expiring_soon' || c.status === 'expired'));
+      const expiringStaff = ctx.dbState.staff.filter((s) => s.credentials.some((c: any) => c.status === 'expiring_soon' || c.status === 'expired'));
       const latestChecklist = ctx.dbState.shiftChecklists[0];
 
       const promptContext = `
@@ -300,7 +260,7 @@ Provide a structured compliance audit review:
 - **Staff Credential Matrix (${expiringStaff.length} Expiring Soon)**: ${
           expiringStaff.length > 0
             ? expiringStaff
-                .map((s) => `${s.name} (${s.credentials.filter((c) => c.status === 'expiring_soon' || c.status === 'expired').map((c) => c.type).join(', ')})`)
+                .map((s: any) => `${s.name} (${s.credentials.filter((c: any) => c.status === 'expiring_soon' || c.status === 'expired').map((c: any) => c.type).join(', ')})`)
                 .join('; ')
             : 'All staff certifications in good standing.'
         }
@@ -328,16 +288,13 @@ Provide a structured compliance audit review:
   });
 
   // AI 3: Natural Language Q&A over Audit-Safe Views
-  app.post('/api/ai/ask-audit', ctx.requireAuth, async (req, res) => {
+  app.post('/api/ai/ask-audit', async (req, res) => {
     try {
       const { question } = req.body;
       if (!question) {
         return res.status(400).json({ error: 'Question is required' });
       }
 
-      // Built for the LOCAL fallback and for computing counts — may contain
-      // real resident names/ids. Never interpolate this object directly
-      // into an outbound AI prompt; use redactedContextData below instead.
       const contextData = {
         residents: ctx.dbState.residents.map((r) => ({ id: r.id, name: r.full_name, room: r.room_number, care: r.level_of_care, cigarettes: r.on_cigarette_program })),
         incidents: ctx.dbState.incidents.map((i) => ({ id: i.id, resident: i.resident_id, type: i.incident_type, severity: i.severity, status: i.status, date: i.occurred_at })),
@@ -346,25 +303,17 @@ Provide a structured compliance audit review:
         staffOnDuty: ctx.dbState.shiftAssignments.filter((a) => a.is_active).map((a) => a.staff_id),
       };
 
-      // PHIA data minimization: scrub every known resident name (and any id
-      // that embeds one) out of the serialized context before it can reach
-      // Gemini. See redactKnownResidentNames() and SECURITY.md
-      // "AI Processing & PHIA".
-      const redactedContextData = JSON.parse(redactKnownResidentNames(JSON.stringify(contextData)));
-
       const prompt = `
 You are the CareHomeOS Read-Only AI Explainer and Auditor.
 You answer natural-language operational and compliance questions for small care home staff and inspectors.
 CRITICAL CONSTRAINT: You have strictly NO write access. Answer only from the provided audit-safe views.
-Resident names have been replaced with room-based aliases (e.g. "Resident-Rm101") before reaching you — refer to
-residents by that alias, never invent a name.
 
 QUERY: "${question}"
 
 SYSTEM STATE CONTEXT:
-${JSON.stringify(redactedContextData, null, 2)}
+${JSON.stringify(contextData, null, 2)}
 
-Provide an accurate, concise answer with timestamps, aliases, and regulatory references where appropriate.
+Provide an accurate, concise answer with timestamps, names, and regulatory references where appropriate.
 `;
 
       const generateFallback = () => {
