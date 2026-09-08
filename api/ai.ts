@@ -19,13 +19,13 @@
 // live writes made through api/index.ts.
 import express from 'express';
 import type { Request, Response } from 'express';
-import { dbState, attachSafetyNetErrorHandler } from '../src/apiApp';
+import { dbState, requireAuth, attachSafetyNetErrorHandler } from '../src/apiApp';
 import { registerAiRoutes } from '../src/aiRoutes';
 
 function createAiApiApp(): express.Express {
   const app = express();
   app.use(express.json());
-  registerAiRoutes(app, { dbState });
+  registerAiRoutes(app, { dbState, requireAuth });
   attachSafetyNetErrorHandler(app);
   return app;
 }

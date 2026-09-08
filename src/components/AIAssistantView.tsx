@@ -13,7 +13,11 @@ import {
 } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 
-export const AIAssistantView: React.FC = () => {
+interface AIAssistantViewProps {
+  token: string;
+}
+
+export const AIAssistantView: React.FC<AIAssistantViewProps> = ({ token }) => {
   const [activeTab, setActiveTab] = useState<'handover' | 'compliance' | 'qa'>('handover');
 
   // Handover state
@@ -50,7 +54,7 @@ export const AIAssistantView: React.FC = () => {
     try {
       const res = await fetch('/api/ai/shift-handover', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
         body: JSON.stringify({ shiftType: 'Day Shift' }),
       });
       const data = await res.json();
@@ -75,7 +79,7 @@ export const AIAssistantView: React.FC = () => {
     try {
       const res = await fetch('/api/ai/compliance-audit', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
       });
       const data = await res.json();
       if (res.ok && data.audit) {
@@ -101,7 +105,7 @@ export const AIAssistantView: React.FC = () => {
     try {
       const res = await fetch('/api/ai/ask-audit', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
         body: JSON.stringify({ question: query }),
       });
       const data = await res.json();

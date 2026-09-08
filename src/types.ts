@@ -29,11 +29,15 @@ export interface Staff {
   home_id: string;
   name: string;
   role: Role;
+  username: string;
   email: string;
   phone: string;
   mfa_enabled: boolean;
   schedule_type: 'rotating_shifts' | 'fixed_office';
   credentials: StaffCredential[];
+  // NOTE: password_hash / OTP state are never on this shared type — they
+  // live server-only (src/seedData.auth.ts, and in-memory OTP/reset state
+  // in src/apiApp.ts) and are never sent to the client. See SECURITY.md.
 }
 
 export interface Shift {

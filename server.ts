@@ -1,6 +1,6 @@
 import express from 'express';
 import path from 'path';
-import { createApiApp, attachSafetyNetErrorHandler, dbState } from './src/apiApp';
+import { createApiApp, attachSafetyNetErrorHandler, dbState, requireAuth } from './src/apiApp';
 import { registerAiRoutes } from './src/aiRoutes';
 
 /**
@@ -20,7 +20,7 @@ import { registerAiRoutes } from './src/aiRoutes';
  */
 async function startServer() {
   const app = createApiApp();
-  registerAiRoutes(app, { dbState });
+  registerAiRoutes(app, { dbState, requireAuth });
   // Must run after every route is registered — including the AI routes
   // just added above — see attachSafetyNetErrorHandler()'s doc comment.
   attachSafetyNetErrorHandler(app);

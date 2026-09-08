@@ -57,6 +57,8 @@ import {
   ExceptionRecord,
 } from './types';
 
+const TOKEN_STORAGE_KEY = 'carehomeos_token';
+
 export default function App() {
   // Navigation
   const [activeTab, setActiveTab] = useState<string>('today');
@@ -64,8 +66,10 @@ export default function App() {
   // Core domain state (initialized with seed, synced with server API)
   const [staffList, setStaffList] = useState<Staff[]>(INITIAL_STAFF);
   // No default staff — the app starts logged out. See LoginView.tsx for the
-  // hardcoded demo accounts (one per role) that set this on sign-in.
+  // real two-layer sign-in (username + password, then a phone/email code).
   const [currentStaff, setCurrentStaff] = useState<Staff | null>(null);
+  const [token, setToken] = useState<string | null>(null);
+  const [authChecked, setAuthChecked] = useState(false);
   const [shifts, setShifts] = useState<Shift[]>(INITIAL_SHIFTS);
   const [shiftAssignments, setShiftAssignments] = useState<ShiftAssignment[]>(INITIAL_SHIFT_ASSIGNMENTS);
   const [residents, setResidents] = useState<Resident[]>(INITIAL_RESIDENTS);
@@ -98,12 +102,34 @@ export default function App() {
 
   const [isShiftChecklistOpen, setIsShiftChecklistOpen] = useState(false);
 
+  // Every authenticated request goes through here so the session token is
+  // never duplicated across call sites. A 401 means the session is gone
+  // (expired, or the server restarted and lost its in-memory state) — drop
+  // back to the login screen rather than leaving the UI silently broken.
+  const authFetch = async (url: string, options: RequestInit = {}, tokenOverride?: string) => {
+    const activeToken = tokenOverride ?? token;
+    const res = await fetch(url, {
+      ...options,
+      headers: {
+        ...(options.body ? { 'Content-Type': 'application/json' } : {}),
+        ...(activeToken ? { Authorization: `Bearer ${activeToken}` } : {}),
+        ...options.headers,
+      },
+    });
+    if (res.status === 401) {
+      setToken(null);
+      setCurrentStaff(null);
+      try { localStorage.removeItem(TOKEN_STORAGE_KEY); } catch {}
+    }
+    return res;
+  };
+
   // Fetch today's shared shift-task board — a separate endpoint (rather than
   // part of /api/state) because reading it is what triggers the server to
   // generate today's task instances from whichever staff are scheduled.
-  const loadShiftTasks = async () => {
+  const loadShiftTasks = async (tokenOverride?: string) => {
     try {
-      const res = await fetch('/api/shift-tasks');
+      const res = await authFetch('/api/shift-tasks', {}, tokenOverride);
       if (res.ok) {
         const data = await res.json();
         if (data.shiftTasks) setShiftTasks(data.shiftTasks);
@@ -116,9 +142,9 @@ export default function App() {
   // Fetch detected exceptions — computed fresh server-side from live data
   // (missed tasks, missed meds, overdue reassessments, expiring
   // credentials, understaffed shifts), not stored records.
-  const loadExceptions = async () => {
+  const loadExceptions = async (tokenOverride?: string) => {
     try {
-      const res = await fetch('/api/exceptions');
+      const res = await authFetch('/api/exceptions', {}, tokenOverride);
       if (res.ok) {
         const data = await res.json();
         if (data.exceptions) setExceptions(data.exceptions);
@@ -128,40 +154,67 @@ export default function App() {
     }
   };
 
-  // Fetch initial state from server
+  const loadOrgState = async (tokenOverride?: string) => {
+    try {
+      const res = await authFetch('/api/state', {}, tokenOverride);
+      if (res.ok) {
+        const data = await res.json();
+        if (data.staff) setStaffList(data.staff);
+        if (data.shifts) setShifts(data.shifts);
+        if (data.shiftAssignments) setShiftAssignments(data.shiftAssignments);
+        if (data.residents) setResidents(data.residents);
+        if (data.prospects) setProspects(data.prospects);
+        if (data.carePlans) setCarePlans(data.carePlans);
+        if (data.reassessments) setReassessments(data.reassessments);
+        if (data.medOrders) setMedOrders(data.medOrders);
+        if (data.medAdmins) setMedAdmins(data.medAdmins);
+        if (data.dailyReports) setDailyReports(data.dailyReports);
+        if (data.shiftChecklists) setShiftChecklists(data.shiftChecklists);
+        if (data.incidents) setIncidents(data.incidents);
+        if (data.auditEvents) setAuditEvents(data.auditEvents);
+        if (data.notifications) setNotifications(data.notifications);
+        if (data.ruleset) setRuleset(data.ruleset);
+        if (data.home) setHome(data.home);
+        if (data.taskDefinitions) setTaskDefinitions(data.taskDefinitions);
+        if (data.shiftTaskTemplates) setShiftTaskTemplates(data.shiftTaskTemplates);
+      }
+    } catch (err) {
+      console.warn('Using client memory state:', err);
+    }
+    await Promise.all([loadShiftTasks(tokenOverride), loadExceptions(tokenOverride)]);
+  };
+
+  // On mount, try to resume a session from localStorage. A stored token
+  // that's expired or invalid (server restarted, etc.) just falls back to
+  // the login screen — see authFetch's 401 handling.
   useEffect(() => {
-    async function loadServerState() {
-      try {
-        const res = await fetch('/api/state');
+    async function bootstrap() {
+      let stored: string | null = null;
+      try { stored = localStorage.getItem(TOKEN_STORAGE_KEY); } catch {}
+      if (stored) {
+        const res = await authFetch('/api/auth/me', {}, stored);
         if (res.ok) {
           const data = await res.json();
-          if (data.staff) setStaffList(data.staff);
-          if (data.shifts) setShifts(data.shifts);
-          if (data.shiftAssignments) setShiftAssignments(data.shiftAssignments);
-          if (data.residents) setResidents(data.residents);
-          if (data.prospects) setProspects(data.prospects);
-          if (data.carePlans) setCarePlans(data.carePlans);
-          if (data.reassessments) setReassessments(data.reassessments);
-          if (data.medOrders) setMedOrders(data.medOrders);
-          if (data.medAdmins) setMedAdmins(data.medAdmins);
-          if (data.dailyReports) setDailyReports(data.dailyReports);
-          if (data.shiftChecklists) setShiftChecklists(data.shiftChecklists);
-          if (data.incidents) setIncidents(data.incidents);
-          if (data.auditEvents) setAuditEvents(data.auditEvents);
-          if (data.notifications) setNotifications(data.notifications);
-          if (data.ruleset) setRuleset(data.ruleset);
-          if (data.home) setHome(data.home);
-          if (data.taskDefinitions) setTaskDefinitions(data.taskDefinitions);
-          if (data.shiftTaskTemplates) setShiftTaskTemplates(data.shiftTaskTemplates);
+          setToken(stored);
+          setCurrentStaff(data.staff);
+          await loadOrgState(stored);
+        } else {
+          try { localStorage.removeItem(TOKEN_STORAGE_KEY); } catch {}
         }
-      } catch (err) {
-        console.warn('Using client memory state:', err);
       }
-      loadShiftTasks();
-      loadExceptions();
+      setAuthChecked(true);
     }
-    loadServerState();
+    bootstrap();
   }, []);
+
+  // Called by LoginView once the full sign-in flow (password + OTP, and
+  // set-new-password if required) completes with a real session token.
+  const handleLogin = async (newToken: string, staff: Staff) => {
+    try { localStorage.setItem(TOKEN_STORAGE_KEY, newToken); } catch {}
+    setToken(newToken);
+    setCurrentStaff(staff);
+    await loadOrgState(newToken);
+  };
 
   const activeAssignment = shiftAssignments.find(
     (a) => a.staff_id === currentStaff?.id && a.is_active
@@ -183,20 +236,30 @@ export default function App() {
     }
   }, [isCareWorker, isOwner, activeTab]);
 
-  // Not logged in yet — show the login gate. Placed after every hook above
-  // (React requires hooks to run in the same order on every render) so
-  // everything below this point can safely treat currentStaff as non-null.
+  // Still resolving a stored session — avoid flashing the login screen for
+  // a user who's actually already signed in.
+  if (!authChecked) {
+    return (
+      <div className="min-h-screen bg-slate-950 flex items-center justify-center">
+        <div className="text-slate-500 text-sm">Loading…</div>
+      </div>
+    );
+  }
+
+  // Not logged in — show the real two-layer sign-in gate. Placed after
+  // every hook above (React requires hooks to run in the same order on
+  // every render) so everything below this point can safely treat
+  // currentStaff as non-null.
   if (!currentStaff) {
-    return <LoginView allStaff={staffList} onLogin={setCurrentStaff} />;
+    return <LoginView onLogin={handleLogin} />;
   }
 
   // Clock In / Out Toggle Handler
   const handleClockToggle = async () => {
     const action = activeAssignment?.is_active ? 'clock_out' : 'clock_in';
     try {
-      const res = await fetch('/api/shifts/clock', {
+      const res = await authFetch('/api/shifts/clock', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           staffId: currentStaff.id,
           shiftId: 'shift-day-today',
@@ -219,16 +282,11 @@ export default function App() {
     }
   };
 
-  // Switch Active Staff Member (Demonstrates RBAC & Segregation of Duties)
-  const handleSelectStaff = (staff: Staff) => {
-    setCurrentStaff(staff);
-    if (staff.role === 'Care Worker' && restrictedTabs.includes(activeTab)) {
-      setActiveTab('today');
-    }
-  };
-
-  // Sign out back to the login screen
+  // Sign out — discards the session both client-side and server-side.
   const handleLogout = () => {
+    authFetch('/api/auth/logout', { method: 'POST' }).catch(() => {});
+    try { localStorage.removeItem(TOKEN_STORAGE_KEY); } catch {}
+    setToken(null);
     setCurrentStaff(null);
     setActiveTab('today');
   };
@@ -253,7 +311,7 @@ export default function App() {
     scheduledTime: string;
   }) => {
     try {
-      const res = await fetch('/api/emar/administer', {
+      const res = await authFetch('/api/emar/administer', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
@@ -284,7 +342,7 @@ export default function App() {
   // Save Daily Shift Report
   const handleSaveDailyReport = async (report: DailyReport) => {
     try {
-      const res = await fetch('/api/daily-reports', {
+      const res = await authFetch('/api/daily-reports', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(report),
@@ -321,7 +379,7 @@ export default function App() {
   // Save End-of-Shift Safety & Medication Checklist
   const handleSaveShiftChecklist = async (checklist: ShiftChecklist) => {
     try {
-      const res = await fetch('/api/shift-checklists', {
+      const res = await authFetch('/api/shift-checklists', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(checklist),
@@ -351,7 +409,7 @@ export default function App() {
   // Submit Incident Report (Taxonomy Form)
   const handleSubmitIncident = async (incident: IncidentReport) => {
     try {
-      const res = await fetch('/api/incidents/submit', {
+      const res = await authFetch('/api/incidents/submit', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(incident),
@@ -403,7 +461,7 @@ export default function App() {
     rejectionReason?: string;
   }) => {
     try {
-      const res = await fetch('/api/incidents/review', {
+      const res = await authFetch('/api/incidents/review', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(data),
@@ -443,7 +501,7 @@ export default function App() {
     newCarePlanCreated: boolean;
   }) => {
     try {
-      const res = await fetch('/api/reassessments/complete', {
+      const res = await authFetch('/api/reassessments/complete', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(data),
@@ -487,7 +545,7 @@ export default function App() {
     actorName: string;
   }) => {
     try {
-      const res = await fetch('/api/prospects/convert', {
+      const res = await authFetch('/api/prospects/convert', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(data),
@@ -542,7 +600,7 @@ export default function App() {
   // Claim / Complete / Skip a shared shift task
   const handleClaimTask = async (taskId: string) => {
     try {
-      const res = await fetch(`/api/shift-tasks/${taskId}/claim`, {
+      const res = await authFetch(`/api/shift-tasks/${taskId}/claim`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ staffId: currentStaff.id, staffName: currentStaff.name }),
@@ -558,7 +616,7 @@ export default function App() {
 
   const handleCompleteTask = async (taskId: string) => {
     try {
-      const res = await fetch(`/api/shift-tasks/${taskId}/complete`, {
+      const res = await authFetch(`/api/shift-tasks/${taskId}/complete`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ staffId: currentStaff.id, staffName: currentStaff.name }),
@@ -575,7 +633,7 @@ export default function App() {
 
   const handleSkipTask = async (taskId: string, reason: string) => {
     try {
-      const res = await fetch(`/api/shift-tasks/${taskId}/skip`, {
+      const res = await authFetch(`/api/shift-tasks/${taskId}/skip`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ staffId: currentStaff.id, staffName: currentStaff.name, reason }),
@@ -597,7 +655,7 @@ export default function App() {
     correctiveAction?: string
   ) => {
     try {
-      const res = await fetch(`/api/exceptions/${exceptionId}/review`, {
+      const res = await authFetch(`/api/exceptions/${exceptionId}/review`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ actorId: currentStaff.id, status, correctiveAction }),
@@ -615,7 +673,7 @@ export default function App() {
   const handleToggleShiftTaskTemplate = async (template: ShiftTaskTemplate) => {
     const updated = { ...template, is_active: !template.is_active };
     try {
-      const res = await fetch('/api/shift-task-templates', {
+      const res = await authFetch('/api/shift-task-templates', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ actorId: currentStaff.id, shiftTaskTemplate: updated }),
@@ -636,11 +694,9 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-slate-100 text-slate-900 flex flex-col font-sans selection:bg-emerald-500 selection:text-white">
-      {/* Top App Header & Shift/Role Switcher */}
+      {/* Top App Header */}
       <Header
         currentStaff={currentStaff}
-        allStaff={staffList}
-        onSelectStaff={handleSelectStaff}
         onLogout={handleLogout}
         activeAssignment={activeAssignment}
         onClockToggle={handleClockToggle}
@@ -815,7 +871,7 @@ export default function App() {
 
         {activeTab === 'audit' && <AuditLogView auditEvents={auditEvents} />}
 
-        {activeTab === 'ai' && <AIAssistantView />}
+        {activeTab === 'ai' && token && <AIAssistantView token={token} />}
       </main>
 
       {/* Global Modals */}
