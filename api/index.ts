@@ -33,8 +33,11 @@
 // requests on Vercel. Treat a Vercel deployment of this app as a login/UI
 // demo only until the data layer moves to a real database (see
 // ARCHITECTURE.md "Prototype → Production").
+// IMPORTANT: this file must never import anything that itself references
+// `@google/genai` (directly or transitively) — see src/aiRoutes.ts's file
+// header. AI features are their own separate function: api/ai.ts.
 import type { Request, Response } from 'express';
-import { createApiApp } from '../src/apiApp';
+import { createApiApp, attachSafetyNetErrorHandler } from '../src/apiApp';
 
 // createApiApp() runs at module-load time (before any request lands), so a
 // throw here is exactly the class of bug that produced the login 500 this
@@ -48,7 +51,9 @@ import { createApiApp } from '../src/apiApp';
 let handler: (req: Request, res: Response) => void;
 
 try {
-  handler = createApiApp();
+  const app = createApiApp();
+  attachSafetyNetErrorHandler(app);
+  handler = app;
 } catch (err: any) {
   console.error('[api] createApiApp() failed to initialize:', err);
   handler = (_req, res) => {
