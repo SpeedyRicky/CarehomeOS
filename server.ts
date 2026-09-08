@@ -1,6 +1,5 @@
 import express from 'express';
 import path from 'path';
-import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
 import { GoogleGenAI } from '@google/genai';
 import {
@@ -46,9 +45,6 @@ import {
 } from './src/types';
 
 dotenv.config();
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
 
 // Session signing secret. MUST be overridden via env in any real deployment —
 // see SECURITY.md "Secrets Management". The fallback exists only so the
