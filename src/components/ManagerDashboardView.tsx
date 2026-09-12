@@ -20,7 +20,11 @@ import {
   ShiftTaskAssignment,
   ExceptionRecord,
   ExceptionSeverity,
+  TaskDefinition,
+  ShiftTaskTemplate,
+  Shift,
 } from '../types';
+import { ShiftTaskSetupPanel } from './ShiftTaskSetupPanel';
 
 interface ManagerDashboardViewProps {
   currentStaff: Staff;
@@ -30,7 +34,12 @@ interface ManagerDashboardViewProps {
   dailyReports: DailyReport[];
   shiftTasks: ShiftTaskAssignment[];
   exceptions: ExceptionRecord[];
+  taskDefinitions: TaskDefinition[];
+  shiftTaskTemplates: ShiftTaskTemplate[];
+  shiftTypes: Shift['shift_type'][];
   onReviewException: (exceptionId: string, status: 'acknowledged' | 'resolved', correctiveAction?: string) => void;
+  onToggleShiftTaskTemplate: (template: ShiftTaskTemplate) => void;
+  onSaveTaskDefinition: (taskDefinition: TaskDefinition, selectedShiftTypes: Shift['shift_type'][]) => void;
   onNavigateToIncidents: () => void;
   onNavigateToTasks: () => void;
 }
@@ -85,7 +94,12 @@ export const ManagerDashboardView: React.FC<ManagerDashboardViewProps> = ({
   dailyReports,
   shiftTasks,
   exceptions,
+  taskDefinitions,
+  shiftTaskTemplates,
+  shiftTypes,
   onReviewException,
+  onToggleShiftTaskTemplate,
+  onSaveTaskDefinition,
   onNavigateToIncidents,
   onNavigateToTasks,
 }) => {
@@ -205,6 +219,14 @@ export const ManagerDashboardView: React.FC<ManagerDashboardViewProps> = ({
           )}
         </div>
       </div>
+
+      <ShiftTaskSetupPanel
+        taskDefinitions={taskDefinitions}
+        shiftTaskTemplates={shiftTaskTemplates}
+        shiftTypes={shiftTypes}
+        onToggleShiftTaskTemplate={onToggleShiftTaskTemplate}
+        onSaveTaskDefinition={onSaveTaskDefinition}
+      />
     </div>
   );
 };

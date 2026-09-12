@@ -542,9 +542,10 @@ export function createApiApp(): express.Express {
     res.json({ taskDefinitions: dbState.taskDefinitions });
   });
 
-  // API: Create or update a task definition. Owner-only — this is the
-  // catalog every home's shift task setup draws from.
-  app.post('/api/task-definitions', requireAuth, requireRole('Owner'), (req: AuthedRequest, res) => {
+  // API: Create or update a task definition — the shared duties (e.g.
+  // housecleaning) every home's shift task setup draws from. Manager or
+  // Owner may configure these.
+  app.post('/api/task-definitions', requireAuth, requireRole('Manager', 'Owner'), (req: AuthedRequest, res) => {
     const { taskDefinition } = req.body as { taskDefinition: TaskDefinition };
     const actor = req.staff!;
 
@@ -565,13 +566,13 @@ export function createApiApp(): express.Express {
     res.json({ success: true, taskDefinition });
   });
 
-  // API: Which tasks occur on which shift type — this is the "owner should
-  // be able to adjust tasks" control surface.
+  // API: Which tasks occur on which shift type — this is the "Manager/Owner
+  // should be able to adjust shared shift duties" control surface.
   app.get('/api/shift-task-templates', requireAuth, (req, res) => {
     res.json({ shiftTaskTemplates: dbState.shiftTaskTemplates });
   });
 
-  app.post('/api/shift-task-templates', requireAuth, requireRole('Owner'), (req: AuthedRequest, res) => {
+  app.post('/api/shift-task-templates', requireAuth, requireRole('Manager', 'Owner'), (req: AuthedRequest, res) => {
     const { shiftTaskTemplate } = req.body as { shiftTaskTemplate: ShiftTaskTemplate };
     const actor = req.staff!;
 

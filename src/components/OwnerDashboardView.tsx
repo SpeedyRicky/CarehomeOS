@@ -10,17 +10,13 @@ import {
   ShieldCheck,
   Building2,
   DollarSign,
-  Settings2,
 } from 'lucide-react';
 import {
   Home,
   Resident,
   Staff,
-  Shift,
   ShiftAssignment,
   IncidentReport,
-  TaskDefinition,
-  ShiftTaskTemplate,
   ExceptionRecord,
 } from '../types';
 
@@ -28,13 +24,9 @@ interface OwnerDashboardViewProps {
   home: Home;
   residents: Resident[];
   staff: Staff[];
-  shifts: Shift[];
   shiftAssignments: ShiftAssignment[];
   incidents: IncidentReport[];
-  taskDefinitions: TaskDefinition[];
-  shiftTaskTemplates: ShiftTaskTemplate[];
   exceptions: ExceptionRecord[];
-  onToggleShiftTaskTemplate: (template: ShiftTaskTemplate) => void;
 }
 
 const StatCard: React.FC<{ label: string; value: number | string; icon: React.ReactNode; tone: 'rose' | 'amber' | 'blue' | 'slate' | 'emerald' }> = ({
@@ -65,13 +57,9 @@ export const OwnerDashboardView: React.FC<OwnerDashboardViewProps> = ({
   home,
   residents,
   staff,
-  shifts,
   shiftAssignments,
   incidents,
-  taskDefinitions,
-  shiftTaskTemplates,
   exceptions,
-  onToggleShiftTaskTemplate,
 }) => {
   const today = new Date().toISOString().split('T')[0];
   const activeResidents = residents.filter((r) => r.status === 'active');
@@ -101,8 +89,6 @@ export const OwnerDashboardView: React.FC<OwnerDashboardViewProps> = ({
   const occupancyPct = home.capacity > 0 ? Math.round((activeResidents.length / home.capacity) * 100) : 0;
 
   const staffOnDutyToday = new Set(shiftAssignments.filter((a) => a.date === today).map((a) => a.staff_id)).size;
-
-  const shiftTypes = Array.from(new Set(shifts.map((s) => s.shift_type)));
 
   return (
     <div className="space-y-6">
@@ -171,52 +157,6 @@ export const OwnerDashboardView: React.FC<OwnerDashboardViewProps> = ({
             </div>
             <div className="text-sm font-semibold text-slate-400">Billing not yet configured</div>
           </div>
-        </div>
-      </div>
-
-      {/* Shift Task Setup */}
-      <div className="bg-white rounded-xl border border-slate-200 shadow-xs">
-        <div className="p-4 border-b border-slate-100">
-          <div className="flex items-center gap-1.5">
-            <Settings2 className="w-4 h-4 text-slate-500" />
-            <h2 className="text-sm font-bold text-slate-900">Shift Task Setup</h2>
-          </div>
-          <p className="text-[11px] text-slate-500 mt-1">
-            Turn tasks on or off per shift type. Staff on duty see and claim whichever tasks are active here — this is how the same shift can look different for a small home vs. a larger one.
-          </p>
-        </div>
-        <div className="divide-y divide-slate-100">
-          {shiftTypes.map((shiftType) => {
-            const templatesForShift = shiftTaskTemplates.filter((t) => t.shift_type === shiftType);
-            return (
-              <div key={shiftType} className="p-4">
-                <div className="text-xs font-bold text-slate-700 mb-2">{shiftType}</div>
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                  {templatesForShift.map((template) => {
-                    const taskDef = taskDefinitions.find((td) => td.id === template.task_definition_id);
-                    if (!taskDef) return null;
-                    return (
-                      <label
-                        key={template.id}
-                        className="flex items-center justify-between gap-2 px-3 py-2 rounded-lg border border-slate-100 hover:border-slate-200 transition cursor-pointer"
-                      >
-                        <span className="text-xs text-slate-700">
-                          {taskDef.name}
-                          <span className="text-slate-400"> · {taskDef.applies_to === 'resident' ? 'per resident' : 'shared'}</span>
-                        </span>
-                        <input
-                          type="checkbox"
-                          checked={template.is_active}
-                          onChange={() => onToggleShiftTaskTemplate(template)}
-                          className="w-4 h-4 accent-emerald-600"
-                        />
-                      </label>
-                    );
-                  })}
-                </div>
-              </div>
-            );
-          })}
         </div>
       </div>
     </div>

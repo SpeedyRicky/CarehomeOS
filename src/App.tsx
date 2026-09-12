@@ -670,7 +670,7 @@ export default function App() {
     }
   };
 
-  // Owner: toggle whether a task occurs on a given shift type
+  // Manager/Owner: toggle whether a task occurs on a given shift type
   const handleToggleShiftTaskTemplate = async (template: ShiftTaskTemplate) => {
     const updated = { ...template, is_active: !template.is_active };
     try {
@@ -690,6 +690,71 @@ export default function App() {
       }
     } catch (err) {
       console.error(err);
+    }
+  };
+
+  // Manager/Owner: create a new shared duty (e.g. a housecleaning task) or
+  // edit an existing one, and reconcile which shift types it's active on —
+  // upserts the TaskDefinition, then upserts a ShiftTaskTemplate row per
+  // known shift type so the selected set is exactly what's active.
+  const handleSaveTaskDefinition = async (taskDefinition: TaskDefinition, selectedShiftTypes: Shift['shift_type'][]) => {
+    try {
+      const res = await authFetch('/api/task-definitions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ actorId: currentStaff.id, taskDefinition }),
+      });
+      if (!res.ok) {
+        const err = await res.json();
+        alert(err.error || 'Could not save task.');
+        return;
+      }
+      const data = await res.json();
+      const saved: TaskDefinition = data.taskDefinition;
+      setTaskDefinitions((prev) => {
+        const idx = prev.findIndex((t) => t.id === saved.id);
+        if (idx >= 0) {
+          const next = [...prev];
+          next[idx] = saved;
+          return next;
+        }
+        return [...prev, saved];
+      });
+
+      const allShiftTypes = Array.from(new Set(shifts.map((s) => s.shift_type)));
+      for (const shiftType of allShiftTypes) {
+        const existing = shiftTaskTemplates.find(
+          (t) => t.task_definition_id === saved.id && t.shift_type === shiftType
+        );
+        const shouldBeActive = selectedShiftTypes.includes(shiftType);
+        if (existing && existing.is_active === shouldBeActive) continue;
+
+        const templateRes = await authFetch('/api/shift-task-templates', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            actorId: currentStaff.id,
+            shiftTaskTemplate: existing
+              ? { ...existing, is_active: shouldBeActive }
+              : { id: '', home_id: '', shift_type: shiftType, task_definition_id: saved.id, is_active: shouldBeActive },
+          }),
+        });
+        if (templateRes.ok) {
+          const templateData = await templateRes.json();
+          setShiftTaskTemplates((prev) => {
+            const idx = prev.findIndex((t) => t.id === templateData.shiftTaskTemplate.id);
+            if (idx >= 0) {
+              const next = [...prev];
+              next[idx] = templateData.shiftTaskTemplate;
+              return next;
+            }
+            return [...prev, templateData.shiftTaskTemplate];
+          });
+        }
+      }
+    } catch (err) {
+      console.error(err);
+      alert('Could not save task.');
     }
   };
 
@@ -744,13 +809,9 @@ export default function App() {
             home={home}
             residents={residents}
             staff={staffList}
-            shifts={shifts}
             shiftAssignments={shiftAssignments}
             incidents={incidents}
-            taskDefinitions={taskDefinitions}
-            shiftTaskTemplates={shiftTaskTemplates}
             exceptions={exceptions}
-            onToggleShiftTaskTemplate={handleToggleShiftTaskTemplate}
           />
         )}
 
@@ -763,7 +824,12 @@ export default function App() {
             dailyReports={dailyReports}
             shiftTasks={shiftTasks}
             exceptions={exceptions}
+            taskDefinitions={taskDefinitions}
+            shiftTaskTemplates={shiftTaskTemplates}
+            shiftTypes={Array.from(new Set(shifts.map((s) => s.shift_type)))}
             onReviewException={handleReviewException}
+            onToggleShiftTaskTemplate={handleToggleShiftTaskTemplate}
+            onSaveTaskDefinition={handleSaveTaskDefinition}
             onNavigateToIncidents={() => setActiveTab('incidents')}
             onNavigateToTasks={() => setActiveTab('today')}
           />
