@@ -41,6 +41,7 @@ import {
   Shift,
   ShiftAssignment,
   Resident,
+  DailyReportBaseline,
   Prospect,
   CarePlan,
   Reassessment,
@@ -371,6 +372,27 @@ export default function App() {
           };
           setAuditEvents((prev) => [auditEvt, ...prev]);
         }
+      }
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  // Manager/Owner: set a resident's "typical good day" baseline — what the
+  // Daily Shift Log's Great Day quick-fill button pre-fills from.
+  const handleSaveResidentBaseline = async (residentId: string, baseline: DailyReportBaseline) => {
+    try {
+      const res = await authFetch(`/api/residents/${residentId}/baseline`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ baseline }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setResidents((prev) => prev.map((r) => (r.id === residentId ? data.resident : r)));
+      } else {
+        const err = await res.json();
+        alert(err.error || 'Could not save this resident\'s baseline.');
       }
     } catch (err) {
       console.error(err);
@@ -880,6 +902,7 @@ export default function App() {
               setIsNewIncidentOpen(true);
             }}
             onNavigateToReassessments={() => setActiveTab('reassessments')}
+            onSaveResidentBaseline={handleSaveResidentBaseline}
           />
         )}
 

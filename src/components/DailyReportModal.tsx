@@ -10,6 +10,7 @@ import {
   Lock,
   Clock,
   ShieldCheck,
+  Sparkles,
 } from 'lucide-react';
 import { DailyReport, Resident, Staff } from '../types';
 
@@ -107,6 +108,57 @@ export const DailyReportModal: React.FC<DailyReportModalProps> = ({
 
     onSaveReport(report);
     onClose();
+  };
+
+  // Quick-fills this resident's own configured "typical good day" (see
+  // ResidentBaselineModal) — or safe, non-resident-specific defaults if
+  // none is set — and immediately saves as a DRAFT, never submitted. This
+  // never locks the record: staff still have to open it, actually look at
+  // whether today matched that baseline, adjust anything that didn't, and
+  // explicitly submit themselves. It exists to save re-typing an
+  // unsurprising day, not to let a shift go undocumented.
+  const handleGreatDay = () => {
+    if (isLocked) return;
+    const baseline = resident.daily_report_baseline;
+    const filledBreakfast = baseline?.breakfast_typical || 'All';
+    const filledLunch = baseline?.lunch_typical || 'All';
+    const filledDinner = baseline?.dinner_typical || 'All';
+    const filledShower = baseline?.shower_typical ?? true;
+    const filledCigaretteCount = resident.on_cigarette_program ? baseline?.cigarette_count_typical ?? 0 : 0;
+    const filledObservations =
+      baseline?.general_observations_typical || 'No behavioral or clinical concerns observed this shift.';
+
+    setBreakfastEaten(filledBreakfast);
+    setLunchEaten(filledLunch);
+    setDinnerEaten(filledDinner);
+    setShowerTaken(filledShower);
+    setCigaretteCount(filledCigaretteCount);
+    setCigaretteTimes([]);
+    setGeneralObservations(filledObservations);
+
+    onSaveReport({
+      id: existingReport?.id || `dr-${resident.id}-${todayDate}`,
+      resident_id: resident.id,
+      date: todayDate,
+      shift_id: 'shift-day-today',
+      authored_by: currentStaff.id,
+      authored_by_name: currentStaff.name,
+      status: 'draft',
+      meals: {
+        breakfast: { offered: true, eaten: filledBreakfast },
+        lunch: { offered: true, eaten: filledLunch },
+        dinner: { offered: true, eaten: filledDinner },
+      },
+      shower_taken: filledShower,
+      skin_observations: skinObservations,
+      cigarette_count: filledCigaretteCount,
+      cigarette_times: [],
+      general_observations: filledObservations,
+      created_at: existingReport?.created_at || new Date().toISOString(),
+      submitted_at: null,
+    });
+    // Deliberately no onClose() — stays open so whoever clicked this can
+    // review what just got filled in before deciding to submit it.
   };
 
   return (
@@ -304,6 +356,15 @@ export const DailyReportModal: React.FC<DailyReportModalProps> = ({
           </button>
           {!isLocked && (
             <>
+              <button
+                type="button"
+                onClick={handleGreatDay}
+                title="Fills in this resident's typical good-day values as a draft — review before submitting."
+                className="mr-auto px-4 py-2 rounded-lg text-xs font-semibold bg-amber-50 text-amber-800 border border-amber-200 hover:bg-amber-100 flex items-center gap-1.5"
+              >
+                <Sparkles className="w-3.5 h-3.5" />
+                <span>Great Day ✓</span>
+              </button>
               <button
                 type="button"
                 onClick={() => handleSave('draft')}

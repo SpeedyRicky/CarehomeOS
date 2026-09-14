@@ -14,7 +14,8 @@ import {
   Sparkles,
   CheckCircle2,
 } from 'lucide-react';
-import { Resident, CarePlan, Reassessment, Staff } from '../types';
+import { Resident, CarePlan, Reassessment, Staff, DailyReportBaseline } from '../types';
+import { ResidentBaselineModal } from './ResidentBaselineModal';
 
 interface ResidentsViewProps {
   residents: Resident[];
@@ -24,6 +25,7 @@ interface ResidentsViewProps {
   onOpenDailyReport: (resident: Resident) => void;
   onOpenNewIncident: (residentId: string) => void;
   onNavigateToReassessments: () => void;
+  onSaveResidentBaseline: (residentId: string, baseline: DailyReportBaseline) => void;
 }
 
 export const ResidentsView: React.FC<ResidentsViewProps> = ({
@@ -34,9 +36,11 @@ export const ResidentsView: React.FC<ResidentsViewProps> = ({
   onOpenDailyReport,
   onOpenNewIncident,
   onNavigateToReassessments,
+  onSaveResidentBaseline,
 }) => {
   const [selectedResidentId, setSelectedResidentId] = useState<string>(residents[0]?.id || '');
   const [filterQuery, setFilterQuery] = useState('');
+  const [isBaselineOpen, setIsBaselineOpen] = useState(false);
 
   const selectedResident = residents.find((r) => r.id === selectedResidentId) || residents[0];
   const activeCarePlan = carePlans.find(
@@ -200,6 +204,15 @@ export const ResidentsView: React.FC<ResidentsViewProps> = ({
                     <AlertCircle className="w-3.5 h-3.5" />
                     <span>Report Incident</span>
                   </button>
+                  {currentStaff.role !== 'Care Worker' && (
+                    <button
+                      onClick={() => setIsBaselineOpen(true)}
+                      className="px-3 py-1.5 rounded-lg bg-amber-50 text-amber-700 border border-amber-200 text-xs font-semibold hover:bg-amber-100 transition flex items-center justify-center gap-1.5"
+                    >
+                      <Sparkles className="w-3.5 h-3.5" />
+                      <span>Daily Log Baseline</span>
+                    </button>
+                  )}
                 </div>
               </div>
 
@@ -283,6 +296,13 @@ export const ResidentsView: React.FC<ResidentsViewProps> = ({
           )}
         </div>
       </div>
+
+      <ResidentBaselineModal
+        isOpen={isBaselineOpen}
+        onClose={() => setIsBaselineOpen(false)}
+        resident={selectedResident || null}
+        onSave={onSaveResidentBaseline}
+      />
     </div>
   );
 };
