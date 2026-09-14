@@ -253,6 +253,7 @@ export type IncidentType =
   | 'self_harm'
   | 'substance_use'
   | 'medication_error'
+  | 'medication_refusal'
   | 'fall_injury'
   | 'elopement'
   | 'property_damage'
@@ -280,6 +281,68 @@ export interface IncidentReport {
   reviewed_by_name: string | null;
   reviewed_at: string | null;
   rejection_reason: string | null;
+  // Set once the report is approved — required to download or print a copy
+  // (see ProtectedDocumentGate). Shared with whichever Caseworker is
+  // assigned to this resident so an exported copy leaving the app is never
+  // openable without it.
+  document_password?: string | null;
+}
+
+// ==========================================
+// CASEWORKERS
+//
+// An external NL Government/funding-agency social worker overseeing one or
+// more residents at this home — NOT home staff, never a Staff record, and
+// never granted the staff login or the full-home /api/state view. Their
+// access is deliberately narrow: shift summaries and *approved* incident
+// reports, and only for the residents on their own case load.
+// ==========================================
+
+export interface Caseworker {
+  id: string;
+  home_id: string;
+  full_name: string;
+  organization: string;
+  email: string;
+  phone: string;
+  assigned_resident_ids: string[];
+}
+
+// ==========================================
+// SHIFT SUMMARIES
+//
+// A single point-in-time snapshot, covering every active resident, taken
+// when staff close out a Day or Night shift (see ShiftSummaryView's
+// "Generate Shift Summary" button — deliberately manual; this app has no
+// background job scheduler to fire one automatically). Distinct from
+// DailyReport (one resident's own log, still editable through the shift)
+// — a ShiftSummary is the frozen handover record for everyone at once,
+// and what a Caseworker's portal actually reads from.
+// ==========================================
+
+export interface ResidentShiftEntry {
+  resident_id: string;
+  resident_name: string;
+  daily_report_status: 'submitted' | 'draft' | 'missing';
+  meals_summary: string;
+  shower_taken: boolean | null;
+  cigarette_count: number | null;
+  general_observations: string;
+  incident_ids: string[];
+}
+
+export interface ShiftSummary {
+  id: string;
+  home_id: string;
+  date: string;
+  shift_type: 'Day Shift (07:00 - 19:00)' | 'Night Shift (19:00 - 07:00)';
+  generated_by: string;
+  generated_by_name: string;
+  generated_at: string;
+  residents: ResidentShiftEntry[];
+  // See IncidentReport.document_password — same purpose, generated
+  // alongside the summary itself.
+  document_password: string;
 }
 
 export interface AuditEvent {

@@ -44,6 +44,7 @@ export const Header: React.FC<HeaderProps> = ({
     ...(!isCareWorker ? [{ id: 'manager-dashboard', label: 'Manager Dashboard' }] : []),
     { id: 'emar', label: 'eMAR Meds' },
     { id: 'incidents', label: 'Incidents & Review', countBadge: '2' },
+    { id: 'shift-summaries', label: 'Shift Summaries' },
     { id: 'residents', label: 'Residents & Care' },
     ...(!isCareWorker
       ? [

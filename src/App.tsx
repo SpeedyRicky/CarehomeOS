@@ -2,6 +2,9 @@ import React, { useState, useEffect } from 'react';
 import { ShieldAlert } from 'lucide-react';
 import { Header } from './components/Header';
 import { LoginView } from './components/LoginView';
+import { CaseworkerLoginView } from './components/CaseworkerLoginView';
+import { CaseworkerPortalView } from './components/CaseworkerPortalView';
+import { ShiftSummaryView } from './components/ShiftSummaryView';
 import { TodayView } from './components/TodayView';
 import { EMARView } from './components/EMARView';
 import { IncidentsView } from './components/IncidentsView';
@@ -56,9 +59,11 @@ import {
   ShiftTaskTemplate,
   ShiftTaskAssignment,
   ExceptionRecord,
+  ShiftSummary,
 } from './types';
 
 const TOKEN_STORAGE_KEY = 'carehomeos_token';
+const CASEWORKER_TOKEN_STORAGE_KEY = 'carehomeos_caseworker_token';
 
 export default function App() {
   // Navigation
@@ -71,6 +76,11 @@ export default function App() {
   const [currentStaff, setCurrentStaff] = useState<Staff | null>(null);
   const [token, setToken] = useState<string | null>(null);
   const [authChecked, setAuthChecked] = useState(false);
+  // Caseworkers are never a Staff record and never see the staff shell at
+  // all — see CaseworkerPortalView. loginMode only controls which login
+  // screen shows before either session exists.
+  const [caseworkerToken, setCaseworkerToken] = useState<string | null>(null);
+  const [loginMode, setLoginMode] = useState<'staff' | 'caseworker'>('staff');
   const [shifts, setShifts] = useState<Shift[]>(INITIAL_SHIFTS);
   const [shiftAssignments, setShiftAssignments] = useState<ShiftAssignment[]>(INITIAL_SHIFT_ASSIGNMENTS);
   const [residents, setResidents] = useState<Resident[]>(INITIAL_RESIDENTS);
@@ -90,6 +100,7 @@ export default function App() {
   // Scheduling & shared shift tasks
   const [taskDefinitions, setTaskDefinitions] = useState<TaskDefinition[]>(INITIAL_TASK_DEFINITIONS);
   const [shiftTaskTemplates, setShiftTaskTemplates] = useState<ShiftTaskTemplate[]>(INITIAL_SHIFT_TASK_TEMPLATES);
+  const [shiftSummaries, setShiftSummaries] = useState<ShiftSummary[]>([]);
   const [shiftTasks, setShiftTasks] = useState<ShiftTaskAssignment[]>([]);
   const [exceptions, setExceptions] = useState<ExceptionRecord[]>([]);
 
@@ -178,6 +189,7 @@ export default function App() {
         if (data.home) setHome(data.home);
         if (data.taskDefinitions) setTaskDefinitions(data.taskDefinitions);
         if (data.shiftTaskTemplates) setShiftTaskTemplates(data.shiftTaskTemplates);
+        if (data.shiftSummaries) setShiftSummaries(data.shiftSummaries);
       }
     } catch (err) {
       console.warn('Using client memory state:', err);
@@ -202,6 +214,13 @@ export default function App() {
         } else {
           try { localStorage.removeItem(TOKEN_STORAGE_KEY); } catch {}
         }
+      } else {
+        // Caseworkers have their own separate session — never checked
+        // when a staff token is already present. CaseworkerPortalView
+        // validates it itself on mount and signs out if it's stale.
+        let storedCaseworker: string | null = null;
+        try { storedCaseworker = localStorage.getItem(CASEWORKER_TOKEN_STORAGE_KEY); } catch {}
+        if (storedCaseworker) setCaseworkerToken(storedCaseworker);
       }
       setAuthChecked(true);
     }
@@ -216,6 +235,43 @@ export default function App() {
     setToken(newToken);
     setCurrentStaff(staff);
     await loadOrgState(newToken);
+  };
+
+  const handleCaseworkerLogin = (newToken: string) => {
+    try { localStorage.setItem(CASEWORKER_TOKEN_STORAGE_KEY, newToken); } catch {}
+    setCaseworkerToken(newToken);
+  };
+
+  const handleCaseworkerLogout = () => {
+    try { localStorage.removeItem(CASEWORKER_TOKEN_STORAGE_KEY); } catch {}
+    setCaseworkerToken(null);
+    setLoginMode('staff');
+  };
+
+  // Any staff role can close out a shift — see src/apiApp.ts's route,
+  // which has no requireRole beyond being signed in at all.
+  const handleGenerateShiftSummary = async (
+    date: string,
+    shiftType: ShiftSummary['shift_type']
+  ): Promise<ShiftSummary | null> => {
+    try {
+      const res = await authFetch('/api/shift-summaries/generate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ date, shiftType }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setShiftSummaries((prev) => [data.shiftSummary, ...prev.filter((s) => s.id !== data.shiftSummary.id)]);
+        return data.shiftSummary;
+      }
+      const err = await res.json();
+      alert(err.error || 'Could not generate shift summary.');
+      return null;
+    } catch (err) {
+      console.error(err);
+      return null;
+    }
   };
 
   const activeAssignment = shiftAssignments.find(
@@ -248,12 +304,22 @@ export default function App() {
     );
   }
 
+  // A caseworker session is a completely separate, much narrower shell —
+  // never the staff app in disguise. Checked before the staff login gate
+  // so a restored caseworker session skips straight past it.
+  if (!currentStaff && caseworkerToken) {
+    return <CaseworkerPortalView token={caseworkerToken} onLogout={handleCaseworkerLogout} />;
+  }
+
   // Not logged in — show the real two-layer sign-in gate. Placed after
   // every hook above (React requires hooks to run in the same order on
   // every render) so everything below this point can safely treat
   // currentStaff as non-null.
   if (!currentStaff) {
-    return <LoginView allStaff={staffList} onLogin={handleLogin} />;
+    if (loginMode === 'caseworker') {
+      return <CaseworkerLoginView onLogin={handleCaseworkerLogin} onBackToStaffLogin={() => setLoginMode('staff')} />;
+    }
+    return <LoginView allStaff={staffList} onLogin={handleLogin} onSwitchToCaseworkerLogin={() => setLoginMode('caseworker')} />;
   }
 
   // Clock In / Out Toggle Handler
@@ -879,6 +945,10 @@ export default function App() {
             }}
             onReviewIncident={handleReviewIncident}
           />
+        )}
+
+        {activeTab === 'shift-summaries' && (
+          <ShiftSummaryView shiftSummaries={shiftSummaries} onGenerate={handleGenerateShiftSummary} />
         )}
 
         {activeTab === 'residents' && (

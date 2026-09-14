@@ -18,6 +18,7 @@ import {
   NotificationItem,
   TaskDefinition,
   ShiftTaskTemplate,
+  Caseworker,
 } from './types';
 
 // Seed shift-assignment dates are computed relative to "today" (rather than
@@ -735,5 +736,20 @@ export const INITIAL_NOTIFICATIONS: NotificationItem[] = [
     created_at: '2026-08-31T08:00:00Z',
     read: true,
     urgency: 'routine',
+  },
+];
+
+// External NL Government / funding-agency social workers — not home staff.
+// See src/types.ts's Caseworker doc comment for why their access is kept
+// separate and resident-scoped rather than folded into the Staff roster.
+export const INITIAL_CASEWORKERS: Caseworker[] = [
+  {
+    id: 'cw-denise-coombs',
+    home_id: 'home-nl-01',
+    full_name: 'Denise Coombs',
+    organization: 'Eastern Health — Community Support Program',
+    email: 'denise.coombs@easternhealth.ca',
+    phone: '(709) 777-4420',
+    assigned_resident_ids: ['res-arthur-walsh', 'res-florence-reid'],
   },
 ];

@@ -13,8 +13,11 @@ import {
   FileText,
   Calendar,
   Eye,
+  Lock,
 } from 'lucide-react';
 import { IncidentReport, Resident, Staff } from '../types';
+import { ProtectedDocumentGate } from './ProtectedDocumentGate';
+import { buildIncidentDocumentText } from '../lib/documentText';
 
 interface IncidentsViewProps {
   incidents: IncidentReport[];
@@ -41,6 +44,7 @@ export const IncidentsView: React.FC<IncidentsViewProps> = ({
   const [selectedIncident, setSelectedIncident] = useState<IncidentReport | null>(incidents[0] || null);
   const [rejectionReasonInput, setRejectionReasonInput] = useState('');
   const [showRejectBox, setShowRejectBox] = useState(false);
+  const [isGateOpen, setIsGateOpen] = useState(false);
 
   const calculateAge = (reportedAt: string) => {
     const diffMs = Date.now() - new Date(reportedAt).getTime();
@@ -412,11 +416,20 @@ export const IncidentsView: React.FC<IncidentsViewProps> = ({
                 )}
 
                 {selectedIncident.status === 'approved' && (
-                  <div className="flex items-center gap-2 text-xs text-emerald-800 bg-emerald-50 p-2.5 rounded-lg border border-emerald-200">
-                    <CheckCircle2 className="w-4 h-4 text-emerald-600" />
-                    <span>
-                      Incident fully approved and archived in compliance records. All changes logged to immutable audit trail.
-                    </span>
+                  <div className="space-y-2">
+                    <div className="flex items-center gap-2 text-xs text-emerald-800 bg-emerald-50 p-2.5 rounded-lg border border-emerald-200">
+                      <CheckCircle2 className="w-4 h-4 text-emerald-600" />
+                      <span>
+                        Incident fully approved and archived in compliance records. All changes logged to immutable audit trail.
+                      </span>
+                    </div>
+                    <button
+                      onClick={() => setIsGateOpen(true)}
+                      className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold transition"
+                    >
+                      <Lock className="w-3.5 h-3.5" />
+                      Print / Download
+                    </button>
                   </div>
                 )}
               </div>
@@ -428,6 +441,21 @@ export const IncidentsView: React.FC<IncidentsViewProps> = ({
           )}
         </div>
       </div>
+
+      {selectedIncident?.status === 'approved' && selectedIncident.document_password && (
+        <ProtectedDocumentGate
+          isOpen={isGateOpen}
+          onClose={() => setIsGateOpen(false)}
+          documentPassword={selectedIncident.document_password}
+          documentTitle={`Incident Report — ${residents.find((r) => r.id === selectedIncident.resident_id)?.full_name || selectedIncident.resident_id}`}
+          buildDocumentText={() =>
+            buildIncidentDocumentText(
+              selectedIncident,
+              residents.find((r) => r.id === selectedIncident.resident_id)?.full_name || selectedIncident.resident_id
+            )
+          }
+        />
+      )}
     </div>
   );
 };
