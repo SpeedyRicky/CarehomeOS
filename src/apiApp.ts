@@ -53,6 +53,7 @@ import {
   ShiftChecklist,
   Reassessment,
   Resident,
+  DailyReportBaseline,
   Prospect,
   Staff,
   TaskDefinition,
@@ -530,6 +531,23 @@ export function createApiApp(): express.Express {
     });
 
     res.json({ success: true, reassessment });
+  });
+
+  // API: Set a resident's "typical good day" baseline — what the Daily
+  // Shift Log's quick-fill button pre-fills from (see DailyReportModal).
+  // Manager/Owner only: this is a clinical-documentation control, not
+  // something whichever staff member is charting that shift should be
+  // able to redefine for themselves.
+  app.post('/api/residents/:id/baseline', requireAuth, requireRole('Manager', 'Owner'), (req: AuthedRequest, res) => {
+    const resident = dbState.residents.find((r) => r.id === req.params.id);
+    if (!resident) {
+      return res.status(404).json({ error: 'Resident not found' });
+    }
+    const { baseline } = req.body as { baseline: DailyReportBaseline };
+    resident.daily_report_baseline = baseline;
+
+    recordEvent(req.staff!.id, req.staff!.name, 'RESIDENT_BASELINE_UPDATED', 'residents', resident.id, { baseline });
+    res.json({ success: true, resident });
   });
 
   // ==========================================

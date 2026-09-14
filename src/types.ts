@@ -104,6 +104,22 @@ export interface Prospect {
 
 export type ResidentStatus = 'active' | 'on-leave' | 'discharged';
 
+// A resident's own "typical good day" — what the Daily Shift Log's
+// quick-fill button (see DailyReportModal's "Great Day" action) pre-fills
+// from. Deliberately per-resident, not a single global default: a
+// cigarette count that's normal for one person is a fabrication for a
+// non-smoker, and "all meals eaten" isn't universal either. Set by a
+// Manager/Owner (see ResidentBaselineModal), never by whichever staff
+// member happens to be charting that day.
+export interface DailyReportBaseline {
+  breakfast_typical: 'All' | 'Most' | 'Half' | 'Little' | 'Refused';
+  lunch_typical: 'All' | 'Most' | 'Half' | 'Little' | 'Refused';
+  dinner_typical: 'All' | 'Most' | 'Half' | 'Little' | 'Refused';
+  shower_typical: boolean;
+  cigarette_count_typical: number;
+  general_observations_typical: string;
+}
+
 export interface Resident {
   id: string;
   home_id: string;
@@ -124,6 +140,7 @@ export interface Resident {
   on_cigarette_program: boolean;
   primary_physician: string;
   allergies: string[];
+  daily_report_baseline?: DailyReportBaseline;
 }
 
 export interface CarePlan {
