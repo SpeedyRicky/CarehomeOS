@@ -5,6 +5,7 @@ import { Staff } from '../types';
 interface LoginViewProps {
   allStaff: Staff[];
   onLogin: (token: string, staff: Staff) => void;
+  onSwitchToCaseworkerLogin: () => void;
 }
 
 type Step = 'login' | 'contact' | 'code';
@@ -41,7 +42,7 @@ function maskEmail(email: string): string {
   return `${visible}${'•'.repeat(Math.max(local.length - 2, 3))}@${domain}`;
 }
 
-export const LoginView: React.FC<LoginViewProps> = ({ allStaff, onLogin }) => {
+export const LoginView: React.FC<LoginViewProps> = ({ allStaff, onLogin, onSwitchToCaseworkerLogin }) => {
   const [step, setStep] = useState<Step>('login');
 
   // Layer one
@@ -300,6 +301,13 @@ export const LoginView: React.FC<LoginViewProps> = ({ allStaff, onLogin }) => {
                 })}
               </div>
             </div>
+            <button
+              type="button"
+              onClick={onSwitchToCaseworkerLogin}
+              className="mt-4 w-full text-center text-xs text-slate-400 hover:text-slate-300 transition"
+            >
+              Case worker? Sign in here
+            </button>
           </>
         )}
       </div>

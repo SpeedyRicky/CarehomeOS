@@ -44,6 +44,7 @@ import {
   INITIAL_NOTIFICATIONS,
   INITIAL_TASK_DEFINITIONS,
   INITIAL_SHIFT_TASK_TEMPLATES,
+  INITIAL_CASEWORKERS,
 } from './seedData';
 import {
   AuditEvent,
@@ -59,6 +60,9 @@ import {
   TaskDefinition,
   ShiftTaskTemplate,
   ShiftTaskAssignment,
+  Caseworker,
+  ShiftSummary,
+  ResidentShiftEntry,
 } from './types';
 import { ensureShiftTasksGenerated } from './shiftTasks';
 import { computeExceptions } from './exceptions';
@@ -101,6 +105,8 @@ export let dbState = {
   shiftTaskTemplates: [...INITIAL_SHIFT_TASK_TEMPLATES] as ShiftTaskTemplate[],
   shiftTaskAssignments: [] as ShiftTaskAssignment[],
   exceptionReviews: {} as Record<string, ExceptionReview>,
+  caseworkers: [...INITIAL_CASEWORKERS] as Caseworker[],
+  shiftSummaries: [] as ShiftSummary[],
 };
 
 export type DbState = typeof dbState;
@@ -171,6 +177,38 @@ export function requireAuth(req: AuthedRequest, res: express.Response, next: exp
   }
   req.staff = staffMember;
   next();
+}
+
+export interface CaseworkerRequest extends express.Request {
+  caseworker?: Caseworker;
+}
+
+// Separate from requireAuth on purpose: a Caseworker is never a Staff
+// record and must never be able to reach a staff-facing route (like
+// /api/state, which dumps every resident in the home) — keeping their
+// auth and their entire route surface (/api/caseworker/*) apart means a
+// bug in one can't leak the other's data, rather than relying on every
+// staff route remembering to check role.
+function requireCaseworkerAuth(req: CaseworkerRequest, res: express.Response, next: express.NextFunction) {
+  const token = getBearerToken(req);
+  const caseworker = token ? dbState.caseworkers.find((c) => c.id === token) : undefined;
+  if (!caseworker) {
+    return res.status(401).json({ error: 'Authentication required. Please sign in.' });
+  }
+  req.caseworker = caseworker;
+  next();
+}
+
+// Human-readable one-time password for a downloaded/printed document (see
+// IncidentReport.document_password / ShiftSummary.document_password) —
+// not a security-grade secret, just enough friction that a copy can't be
+// produced or read without whoever holds it (staff, and the resident's
+// assigned Caseworker) taking an active step.
+function generateDocumentPassword(): string {
+  const words = ['harbor', 'spruce', 'tundra', 'anchor', 'gander', 'quartz', 'meadow', 'signal'];
+  const word = words[Math.floor(Math.random() * words.length)];
+  const digits = Math.floor(1000 + Math.random() * 9000);
+  return `${word}-${digits}`;
 }
 
 function requireRole(...roles: Array<Staff['role']>) {
@@ -484,6 +522,10 @@ export function createApiApp(): express.Express {
       incident.reviewed_by_name = reviewerName;
       incident.reviewed_at = new Date().toISOString();
       incident.rejection_reason = null;
+      // Only an approved report is ever shared outward (see the Caseworker
+      // routes below), so the download/print password is generated here,
+      // not at submission.
+      incident.document_password = generateDocumentPassword();
 
       recordEvent(reviewerId, reviewerName, 'INCIDENT_APPROVED', 'incident_reports', incident.id, {
         reviewer_role: reviewerRole,
@@ -724,6 +766,134 @@ export function createApiApp(): express.Express {
     });
 
     res.json({ success: true, exceptions: computeExceptions(dbState) });
+  });
+
+  // ==========================================
+  // SHIFT SUMMARIES
+  //
+  // A frozen, all-residents-at-once handover snapshot, distinct from
+  // DailyReport (one resident's own still-editable log). Generated
+  // manually — see the route below — never on a timer, since this app
+  // has no background job scheduler and an in-memory store that resets
+  // on every cold start couldn't be trusted to remember to fire one
+  // anyway.
+  // ==========================================
+
+  function buildResidentShiftEntry(resident: Resident, date: string): ResidentShiftEntry {
+    const report = dbState.dailyReports.find((r) => r.resident_id === resident.id && r.date === date);
+    const incidentIdsThatDay = dbState.incidents
+      .filter((i) => i.resident_id === resident.id && i.occurred_at.startsWith(date))
+      .map((i) => i.id);
+
+    if (!report) {
+      return {
+        resident_id: resident.id,
+        resident_name: resident.full_name,
+        daily_report_status: 'missing',
+        meals_summary: 'No daily log entered yet.',
+        shower_taken: null,
+        cigarette_count: resident.on_cigarette_program ? null : 0,
+        general_observations: '',
+        incident_ids: incidentIdsThatDay,
+      };
+    }
+
+    return {
+      resident_id: resident.id,
+      resident_name: resident.full_name,
+      daily_report_status: report.status,
+      meals_summary: `Breakfast: ${report.meals.breakfast.eaten} · Lunch: ${report.meals.lunch.eaten} · Dinner: ${report.meals.dinner.eaten}`,
+      shower_taken: report.shower_taken,
+      cigarette_count: resident.on_cigarette_program ? report.cigarette_count : null,
+      general_observations: report.general_observations || '',
+      incident_ids: incidentIdsThatDay,
+    };
+  }
+
+  // API: List past shift summaries, most recent first.
+  app.get('/api/shift-summaries', requireAuth, (req, res) => {
+    res.json({ shiftSummaries: dbState.shiftSummaries });
+  });
+
+  // API: Snapshot every active resident's current daily log + that day's
+  // incidents into one handover record for the shift just ending.
+  app.post('/api/shift-summaries/generate', requireAuth, (req: AuthedRequest, res) => {
+    const { date, shiftType } = req.body as { date?: string; shiftType?: ShiftSummary['shift_type'] };
+    const actor = req.staff!;
+    if (!date || (shiftType !== 'Day Shift (07:00 - 19:00)' && shiftType !== 'Night Shift (19:00 - 07:00)')) {
+      return res.status(400).json({ error: 'A date and a valid Day/Night shiftType are required.' });
+    }
+
+    const activeResidents = dbState.residents.filter((r) => r.status === 'active');
+    const summary: ShiftSummary = {
+      id: `ss-${date}-${shiftType.startsWith('Day') ? 'day' : 'night'}-${Date.now()}`,
+      home_id: dbState.home.id,
+      date,
+      shift_type: shiftType,
+      generated_by: actor.id,
+      generated_by_name: actor.name,
+      generated_at: new Date().toISOString(),
+      residents: activeResidents.map((r) => buildResidentShiftEntry(r, date)),
+      document_password: generateDocumentPassword(),
+    };
+
+    // Replacing any earlier summary for the same date+shift keeps this
+    // idempotent if staff regenerate after a late correction, rather than
+    // piling up duplicates for the same handover.
+    dbState.shiftSummaries = dbState.shiftSummaries.filter((s) => !(s.date === date && s.shift_type === shiftType));
+    dbState.shiftSummaries.unshift(summary);
+
+    recordEvent(actor.id, actor.name, 'SHIFT_SUMMARY_GENERATED', 'shift_summaries', summary.id, {
+      date,
+      shift_type: shiftType,
+      resident_count: summary.residents.length,
+    });
+
+    res.json({ success: true, shiftSummary: summary });
+  });
+
+  // ==========================================
+  // CASEWORKER PORTAL
+  //
+  // External NL Government / funding-agency social workers — never Staff,
+  // never able to reach a staff route. Read-only, and scoped to only the
+  // residents on their own case load: shift summaries (filtered down to
+  // just their residents' entries) and *approved* incident reports only —
+  // never drafts, submitted-pending-review, or rejected ones.
+  // ==========================================
+
+  app.get('/api/caseworker/me', requireCaseworkerAuth, (req: CaseworkerRequest, res) => {
+    const cw = req.caseworker!;
+    const residents = dbState.residents
+      .filter((r) => cw.assigned_resident_ids.includes(r.id))
+      .map((r) => ({ id: r.id, full_name: r.full_name, room_number: r.room_number, level_of_care: r.level_of_care }));
+    res.json({ caseworker: cw, residents });
+  });
+
+  app.get('/api/caseworker/incidents', requireCaseworkerAuth, (req: CaseworkerRequest, res) => {
+    const cw = req.caseworker!;
+    const incidents = dbState.incidents.filter(
+      (i) => i.status === 'approved' && cw.assigned_resident_ids.includes(i.resident_id)
+    );
+    res.json({ incidents });
+  });
+
+  app.get('/api/caseworker/shift-summaries', requireCaseworkerAuth, (req: CaseworkerRequest, res) => {
+    const cw = req.caseworker!;
+    const approvedIncidentIds = new Set(
+      dbState.incidents
+        .filter((i) => i.status === 'approved' && cw.assigned_resident_ids.includes(i.resident_id))
+        .map((i) => i.id)
+    );
+    const shiftSummaries = dbState.shiftSummaries
+      .map((s) => ({
+        ...s,
+        residents: s.residents
+          .filter((r) => cw.assigned_resident_ids.includes(r.resident_id))
+          .map((r) => ({ ...r, incident_ids: r.incident_ids.filter((id) => approvedIncidentIds.has(id)) })),
+      }))
+      .filter((s) => s.residents.length > 0);
+    res.json({ shiftSummaries });
   });
 
   return app;

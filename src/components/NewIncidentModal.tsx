@@ -60,6 +60,10 @@ export const NewIncidentModal: React.FC<NewIncidentModalProps> = ({
   const [medErrorType, setMedErrorType] = useState<'wrong_dose' | 'wrong_time' | 'wrong_resident' | 'omission'>('wrong_dose');
   const [correctiveAction, setCorrectiveAction] = useState('');
 
+  const [refusalLinkedOrderId, setRefusalLinkedOrderId] = useState('');
+  const [refusalReason, setRefusalReason] = useState('');
+  const [prescriberNotified, setPrescriberNotified] = useState(false);
+
   const [fallLocation, setFallLocation] = useState('Dining Room');
   const [fallWitnessed, setFallWitnessed] = useState(true);
   const [firstAidGiven, setFirstAidGiven] = useState(true);
@@ -82,6 +86,8 @@ export const NewIncidentModal: React.FC<NewIncidentModalProps> = ({
       setSeverity('Critical');
     } else if (newType === 'substance_use' || newType === 'medication_error') {
       setSeverity('High');
+    } else if (newType === 'medication_refusal') {
+      setSeverity('Medium');
     } else if (newType === 'behavioral' || newType === 'fall_injury') {
       setSeverity('Medium');
     } else if (newType === 'property_damage') {
@@ -113,6 +119,13 @@ export const NewIncidentModal: React.FC<NewIncidentModalProps> = ({
           linked_medication_order_id: linkedOrderId || medOrders[0]?.id,
           error_type: medErrorType,
           corrective_action: correctiveAction,
+        };
+        break;
+      case 'medication_refusal':
+        typeDetails = {
+          linked_medication_order_id: refusalLinkedOrderId || medOrders[0]?.id,
+          reason_given: refusalReason,
+          prescriber_notified: prescriberNotified,
         };
         break;
       case 'fall_injury':
@@ -231,6 +244,7 @@ export const NewIncidentModal: React.FC<NewIncidentModalProps> = ({
                 <option value="behavioral">Behavioral / Aggression</option>
                 <option value="fall_injury">Fall / Injury</option>
                 <option value="medication_error">Medication Error</option>
+                <option value="medication_refusal">Medication Refusal</option>
                 <option value="self_harm">Self-Harm / Suicidal Ideation</option>
                 <option value="substance_use">Substance Use / Relapse</option>
                 <option value="elopement">Elopement / Missing Resident</option>
@@ -391,6 +405,44 @@ export const NewIncidentModal: React.FC<NewIncidentModalProps> = ({
                     className="w-full text-xs border border-slate-300 rounded-lg px-2.5 py-1.5"
                   />
                 </div>
+              </div>
+            )}
+
+            {incidentType === 'medication_refusal' && (
+              <div className="space-y-2.5">
+                <div>
+                  <label className="block text-xs font-medium text-slate-600 mb-1">Refused Medication Order</label>
+                  <select
+                    value={refusalLinkedOrderId}
+                    onChange={(e) => setRefusalLinkedOrderId(e.target.value)}
+                    className="w-full text-xs border border-slate-300 rounded-lg px-2.5 py-1.5 bg-white"
+                  >
+                    {medOrders.map((o) => (
+                      <option key={o.id} value={o.id}>
+                        {o.drug_name} ({o.dose})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-slate-600 mb-1">Reason Given by Resident</label>
+                  <input
+                    type="text"
+                    value={refusalReason}
+                    onChange={(e) => setRefusalReason(e.target.value)}
+                    placeholder="e.g. Reports nausea, declined without explanation, disliked taste"
+                    className="w-full text-xs border border-slate-300 rounded-lg px-2.5 py-1.5"
+                  />
+                </div>
+                <label className="flex items-center gap-2 text-xs text-slate-700">
+                  <input
+                    type="checkbox"
+                    checked={prescriberNotified}
+                    onChange={(e) => setPrescriberNotified(e.target.checked)}
+                    className="w-4 h-4 accent-emerald-600"
+                  />
+                  Prescriber notified
+                </label>
               </div>
             )}
 
